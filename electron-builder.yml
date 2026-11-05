@@ -1,0 +1,47 @@
+appId: app.vysebar
+productName: VyseBar
+copyright: Copyright © 2026 Sameer
+
+directories:
+  buildResources: build
+  output: release
+
+# everything the app needs is bundled into out/ by electron-vite
+files:
+  - out/**
+  - package.json
+asar: true
+
+extraResources:
+  - from: resources/bin
+    to: bin
+    filter:
+      - VyseHost.exe
+
+# the architecture comes from the command line: dist:win is 64-bit, dist:win32 is 32-bit
+# (Electron 43 is the last line with 32-bit Windows builds, so dist:win32 packs with it)
+win:
+  target:
+    - target: nsis
+  icon: build/icon.ico
+  executableName: VyseBar
+  artifactName: VyseBar-Setup-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: VyseBar
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false
+
+# updates: the installed app looks for newer releases here (src/main/updater.ts). 64-bit builds
+# read latest.yml; the 32-bit build is made with -c.publish.channel=ia32 and reads ia32.yml.
+# Releases are uploaded by hand (gh release create), so builds never publish by themselves.
+publish:
+  provider: github
+  owner: Sameer786op
+  repo: vysebar
+  releaseType: release
