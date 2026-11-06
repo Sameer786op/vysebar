@@ -58,18 +58,20 @@ export function Bar({ value, color = "var(--accent)", height = 4, className = ""
   );
 }
 
-export function Sparkline({ values, width = 80, height = 24, color = "var(--accent)", fill = true, strokeWidth = 1.6 }: {
+export function Sparkline({ values, width = 80, height = 24, color = "var(--accent)", fill = true, strokeWidth = 1.6, range }: {
   values: number[];
   width?: number;
   height?: number;
   color?: string;
   fill?: boolean;
   strokeWidth?: number;
+  /** a fixed scale (a share from 0 to 100, say) instead of the values' own low and high */
+  range?: [number, number];
 }) {
   const id = useRef(`sp${Math.random().toString(36).slice(2, 8)}`).current;
   if (values.length < 2) return <svg width={width} height={height} />;
-  const min = Math.min(...values);
-  const max = Math.max(...values);
+  const min = range ? Math.min(range[0], ...values) : Math.min(...values);
+  const max = range ? Math.max(range[1], ...values) : Math.max(...values);
   const span = max - min || 1;
   const pts = values.map((v, i) => [(i / (values.length - 1)) * width, height - 2 - ((v - min) / span) * (height - 4)]);
   const d = pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join("");

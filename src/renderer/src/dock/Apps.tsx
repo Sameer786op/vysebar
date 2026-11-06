@@ -1,5 +1,5 @@
 // The taskbar part of the dock: Start, pinned apps, groups and whatever else is running.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { AnimatePresence, Reorder, motion, useAnimationControls } from "motion/react";
 import { AppWindow, ArrowUpRight, ExternalLink, FileText, Folder, FolderPlus, Pin as PinIcon, PinOff, Skull, SquarePlus, X } from "lucide-react";
 import type { AppItem, GoogleProfile, Pin, WinInfo } from "@shared/types";
@@ -7,6 +7,7 @@ import { host, setSettings, useCommitted, useSettings, useStore, useTopic } from
 import { VyseLogo, WindowsLogo } from "../components/icons";
 import type { MenuItem, TileProps, WidgetDef } from "../widgets/types";
 import { useDock } from "../widgets/types";
+import { FolderStack } from "../widgets/shortcuts";
 
 const vyse = window.vyse;
 
@@ -47,6 +48,23 @@ const loadRecent = (app: AppItem) =>
 
 const activate = (w: WinInfo, toggle = true) => vyse.invoke("win:activate", w.hwnd, toggle);
 const launch = (pin: Pin) => vyse.invoke("pin:launch", pin);
+
+// Win+T: the app the keys are on, and which of its windows (-1: the app itself)
+type NavSel = { app: string; win: number } | null;
+let navSel: NavSel = null;
+const navSubs = new Set<() => void>();
+const setNav = (n: NavSel) => {
+  navSel = n;
+  navSubs.forEach((f) => f());
+};
+const useNav = () =>
+  useSyncExternalStore(
+    (f) => {
+      navSubs.add(f);
+      return () => void navSubs.delete(f);
+    },
+    () => navSel,
+  );
 
 // ---------- Start ----------
 
@@ -147,6 +165,8 @@ function Previews({ app, close }: { app: AppItem; close: () => void }) {
     if (peeking.current) peekTimer.current = setTimeout(stopPeek, 140);
   };
   useEffect(() => stopPeek, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const nav = useNav();
+  const navHwnd = nav?.app === app.key && nav.win >= 0 && wins.length ? wins[nav.win % wins.length].hwnd : undefined;
   useEffect(() => {
     let off = false;
     const load = () => vyse.invoke<Record<number, string>>("win:thumbs", wins.map((w) => w.hwnd)).then((t) => !off && setThumbs(t ?? {}));
@@ -183,7 +203,10 @@ function Previews({ app, close }: { app: AppItem; close: () => void }) {
             closeWin(w);
           }}
           className="group relative flex w-[188px] flex-col overflow-hidden rounded-[14px] p-1.5 text-left transition-colors hover:bg-[var(--chip)]"
-          style={{ outline: w.active ? "1.5px solid var(--accent)" : undefined }}
+          style={{
+            outline: w.hwnd === navHwnd ? "2px solid var(--accent)" : w.active ? "1.5px solid var(--accent)" : undefined,
+            background: w.hwnd === navHwnd ? "var(--chip)" : undefined,
+          }}
         >
           <div className="mb-1.5 flex items-center gap-1.5 px-0.5">
             {app.icon && !app.key.startsWith("group:") && <img src={app.icon} className="h-4 w-4" />}
@@ -276,6 +299,11 @@ function AppIcon({ app, onLaunch, dragging }: { app: AppItem; onLaunch?: () => v
     if (isGroup) {
       if (dock.cardUid === app.key) return dock.closeCard();
       return ref.current && dock.openCard(app.key, ref.current, <GroupCard app={app} close={dock.closeCard} />, { width: 330 });
+    }
+    // a pinned folder fans out as a stack; Shift+click opens it in Explorer instead
+    if (app.pin?.folder && app.pin.path && !e.shiftKey) {
+      if (dock.cardUid === app.key) return dock.closeCard();
+      return ref.current && dock.openCard(app.key, ref.current, <FolderStack path={app.pin.path} name={app.pin.name} />, { width: 400 });
     }
     const wins = app.windows;
     if (!wins.length || e.shiftKey) {
@@ -407,12 +435,46 @@ function AppIcon({ app, onLaunch, dragging }: { app: AppItem; onLaunch?: () => v
   };
   const keyRef = useRef(keyAction);
   keyRef.current = keyAction;
+
+  // Win+T on this app: its previews come up, Tab or the arrows pick a window, Enter opens it
+  const nav = useNav();
+  const selected = nav?.app === app.key;
+  useEffect(() => {
+    if (!selected) return;
+    if (!isGroup && s.previews && app.windows.length) openPreviews(true);
+    else if (dock.cardUid) dock.closeCard();
+  }, [selected]); // eslint-disable-line react-hooks/exhaustive-deps
+  const navAction = (k: string) => {
+    const n = navSel;
+    if (!n || n.app !== app.key) return;
+    const wins = isGroup ? [] : app.windows;
+    if (k === "enter") {
+      const w = n.win >= 0 ? wins[n.win % Math.max(1, wins.length)] : wins.length === 1 ? wins[0] : undefined;
+      if (w) {
+        dock.closeCard();
+        return void activate(w, false);
+      }
+      return keyAction("open");
+    }
+    if (!wins.length) return;
+    if (k === "winIn") return setNav({ ...n, win: Math.max(0, n.win) });
+    const step = k === "winNext" ? 1 : -1;
+    setNav({ ...n, win: n.win < 0 ? (step > 0 ? 0 : wins.length - 1) : (n.win + step + wins.length) % wins.length });
+  };
+  const navRef = useRef(navAction);
+  navRef.current = navAction;
+
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
     const on = (e: Event) => keyRef.current((e as CustomEvent<string>).detail);
+    const onNav = (e: Event) => navRef.current((e as CustomEvent<string>).detail);
     el.addEventListener("vyse-hotkey", on);
-    return () => el.removeEventListener("vyse-hotkey", on);
+    el.addEventListener("vyse-nav", onNav);
+    return () => {
+      el.removeEventListener("vyse-hotkey", on);
+      el.removeEventListener("vyse-nav", onNav);
+    };
   }, []);
 
   const enter = () => {
@@ -427,14 +489,21 @@ function AppIcon({ app, onLaunch, dragging }: { app: AppItem; onLaunch?: () => v
     if (dock.cardUid === app.key) dock.hoverCard(false);
   };
 
-  const showLabel = s.labels && hover && !dragging && dock.cardUid !== app.key;
+  const showLabel = s.labels && (hover || selected) && !dragging && dock.cardUid !== app.key;
   return (
     <motion.div
       ref={ref}
       data-hit
       data-app={app.key}
       className="relative grid shrink-0 place-items-center"
-      style={{ width: size, height: size, borderRadius: Math.round(size * 0.28), background: hover && !dragging ? "var(--tile-hover)" : app.active ? "var(--app-active)" : "transparent", transition: "background 0.15s" }}
+      style={{
+        width: size,
+        height: size,
+        borderRadius: Math.round(size * 0.28),
+        background: (hover && !dragging) || selected ? "var(--tile-hover)" : app.active ? "var(--app-active)" : "transparent",
+        boxShadow: selected && (nav?.win ?? -1) < 0 ? "inset 0 0 0 2px var(--accent)" : undefined,
+        transition: "background 0.15s, box-shadow 0.15s",
+      }}
       onClick={click}
       onAuxClick={(e) => {
         if (e.button !== 1) return;
@@ -503,6 +572,55 @@ export function Apps({ onDragStart }: { onDragStart?: (e: React.PointerEvent) =>
       }),
     [],
   );
+
+  // Win+T: the arrows (or Win+T again) go from app to app; toward the previews, Tab, or the
+  // arrows inside them pick a window; Enter opens it; Esc, a click or another key leaves
+  const dockRef = useRef(dock);
+  dockRef.current = dock;
+  useEffect(() => {
+    const off = vyse.on("dock:nav", (n: { key: string }) => {
+      const d = dockRef.current;
+      const icons = [...(rootRef.current?.querySelectorAll<HTMLElement>("[data-app]") ?? [])];
+      const keys = icons.map((el) => el.dataset.app ?? "");
+      const cur = navSel ? keys.indexOf(navSel.app) : -1;
+      const send = (k: string) => cur >= 0 && icons[cur].dispatchEvent(new CustomEvent("vyse-nav", { detail: k }));
+      const inWins = !!navSel && navSel.win >= 0;
+      const toward = d.edge === "bottom" ? "up" : "down";
+      const back = d.edge === "bottom" ? "down" : "up";
+      switch (n.key) {
+        case "next":
+        case "prev":
+        case "left":
+        case "right": {
+          if (inWins && (n.key === "left" || n.key === "right")) return void send(n.key === "right" ? "winNext" : "winPrev");
+          if (!keys.length) return;
+          const fwd = n.key === "next" || n.key === "right";
+          const i = cur < 0 ? (fwd ? 0 : keys.length - 1) : (cur + (fwd ? 1 : -1) + keys.length) % keys.length;
+          return setNav({ app: keys[i], win: -1 });
+        }
+        case "tab":
+          return void send("winNext");
+        case "shiftTab":
+          return void send("winPrev");
+        case toward:
+          return void send("winIn");
+        case back:
+          return navSel && setNav({ ...navSel, win: -1 });
+        case "enter":
+          send("enter");
+          return setNav(null);
+        default:
+          // Esc, or Win+T ended some other way
+          if (!navSel) return;
+          if (d.cardUid === navSel.app) d.closeCard();
+          setNav(null);
+      }
+    });
+    return () => {
+      off();
+      setNav(null);
+    };
+  }, []);
 
   const byKey = new Map(apps.map((a) => [a.key, a]));
   const pinned = order.map((id) => s.pins.find((p) => p.id === id)).filter((p): p is Pin => !!p);

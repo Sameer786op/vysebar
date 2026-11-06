@@ -11,6 +11,7 @@ import { widgetByType } from "../widgets/registry";
 import { Apps } from "./Apps";
 import { Card, Menu, Toasts, type CardState } from "./Overlay";
 import { Glass, type GlassMode } from "./Glass";
+import { useAlbumColor } from "../lib/albumColor";
 
 const vyse = window.vyse;
 
@@ -122,6 +123,7 @@ function WidgetItem({ inst, def, look, remove, onDragEdge }: { inst: WidgetInsta
           ref={ref}
           data-hit
           data-glass="tile"
+          data-widget={def.type}
           onPointerDown={startDrag}
           onClick={click}
           onContextMenu={menu}
@@ -187,6 +189,10 @@ export function Dock({ displayId }: { displayId: number }) {
   const hov = useRef({ tile: false, card: false });
   const hovTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const hideTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  /** no window is open on this screen (auto-hide's "show on desktop") */
+  const desktop = useRef(false);
+  const navOn = useRef(false);
+  const mayHide = () => !dragging.current && !cardRef.current && !desktop.current && !navOn.current;
   cardRef.current = card;
 
   const pad = Math.max(3, Math.round(s.size * 0.065));
@@ -200,13 +206,16 @@ export function Dock({ displayId }: { displayId: number }) {
     return vyse.on("dock:info", (i: DockInfo) => setInfo(i));
   }, [displayId]);
 
+  // the accent can follow the cover of what's playing; it goes back to yours once nothing is
+  const album = useAlbumColor(s.albumAccent);
+  const accent = album ?? s.accent;
   useLayoutEffect(() => {
     const root = document.documentElement;
     root.dataset.edge = edge;
     root.classList.toggle("theme-light", look.light);
     root.classList.toggle("theme-dark", !look.light);
-    root.style.setProperty("--accent", s.accent);
-  }, [edge, look.light, s.accent]);
+    root.style.setProperty("--accent", accent);
+  }, [edge, look.light, accent, album]);
 
   useEffect(() => {
     if (!reordering) setOrder(s.widgets.map((w) => w.uid));
@@ -266,6 +275,32 @@ export function Dock({ displayId }: { displayId: number }) {
     tile,
   };
 
+  // Alt+T: the To-do card from its tile, or out of the dock's middle when there is no tile
+  useEffect(
+    () =>
+      vyse.on("dock:shortcut", (name: string) => {
+        if (name !== "todo") return;
+        // pressed again, it closes the card (a tile's click does that by itself)
+        if (cardRef.current?.uid === "todos:shortcut") return closeCard();
+        const tileEl = document.querySelector<HTMLElement>('[data-widget="todos"]');
+        if (tileEl) return tileEl.click();
+        const def = widgetByType.get("todos");
+        if (!def?.Card || !plate.current) return;
+        const inst = { uid: "todos:shortcut", type: "todos" };
+        openCard(inst.uid, plate.current, <def.Card inst={inst} close={closeCard} />, { width: def.cardWidth, focus: true });
+      }),
+    [closeCard, openCard],
+  );
+
+  // Win+T: while it's on, the dock stays up
+  useEffect(
+    () =>
+      vyse.on("dock:nav", (n: { key: string }) => {
+        navOn.current = !(n.key === "enter" || n.key === "esc" || n.key === "cancel");
+      }),
+    [],
+  );
+
   // a real app taking the foreground (you clicked somewhere else) closes what is open
   useEffect(
     () =>
@@ -307,7 +342,7 @@ export function Dock({ displayId }: { displayId: number }) {
       set(hit);
       if (useStore.getState().settings.autoHide) {
         clearTimeout(hideTimer.current);
-        if (!hit && !cardRef.current) hideTimer.current = setTimeout(() => !dragging.current && !cardRef.current && setHidden(true), 650);
+        if (!hit && !cardRef.current) hideTimer.current = setTimeout(() => mayHide() && setHidden(true), 650);
       }
     };
     const leave = () => set(dragging.current);
@@ -322,7 +357,7 @@ export function Dock({ displayId }: { displayId: number }) {
   // ---- auto-hide ----
   useEffect(() => {
     if (!s.autoHide) return setHidden(false);
-    const t = setTimeout(() => !cardRef.current && setHidden(true), 1500);
+    const t = setTimeout(() => mayHide() && setHidden(true), 1500);
     const off = vyse.on("dock:reveal", () => {
       clearTimeout(hideTimer.current);
       setHidden(false);
@@ -330,12 +365,20 @@ export function Dock({ displayId }: { displayId: number }) {
     // Start closed again: hide unless a card is open
     const offConceal = vyse.on("dock:conceal", () => {
       clearTimeout(hideTimer.current);
-      hideTimer.current = setTimeout(() => !dragging.current && !cardRef.current && setHidden(true), 400);
+      hideTimer.current = setTimeout(() => mayHide() && setHidden(true), 400);
+    });
+    // nothing open on this screen: the dock stays up until a window opens there
+    const offDesktop = vyse.on("dock:desktop", (on: boolean) => {
+      desktop.current = on;
+      clearTimeout(hideTimer.current);
+      if (on) setHidden(false);
+      else hideTimer.current = setTimeout(() => mayHide() && setHidden(true), 900);
     });
     return () => {
       clearTimeout(t);
       off();
       offConceal();
+      offDesktop();
     };
   }, [s.autoHide]);
 

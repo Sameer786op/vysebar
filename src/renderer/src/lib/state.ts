@@ -53,6 +53,12 @@ export function setSettings(patch: Partial<Settings>): void {
   else void vyse.invoke("settings:set", patch);
 }
 
+/** one widget's own options (which drive, which folder...), kept with the widget in settings */
+export function setWidgetConfig(uid: string, patch: Record<string, unknown>): void {
+  const widgets = useStore.getState().settings.widgets.map((w) => (w.uid === uid ? { ...w, config: { ...w.config, ...patch } } : w));
+  setSettings({ widgets });
+}
+
 export function setData(patch: Partial<Data>): void {
   useStore.setState((st) => ({ data: { ...st.data, ...patch } }));
   if (leaving) vyse.sendSync("data:setNow", patch);

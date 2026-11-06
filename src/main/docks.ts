@@ -3,8 +3,8 @@
 // take the mouse; everywhere else clicks fall through to the windows behind.
 import { join } from "node:path";
 import { readFileSync, existsSync } from "node:fs";
-import { BrowserWindow, ipcMain, nativeImage, screen, type Display } from "electron";
-import type { DockInfo } from "@shared/types";
+import { BrowserWindow, ipcMain, nativeImage, powerMonitor, screen, type Display } from "electron";
+import type { DockInfo, WinInfo } from "@shared/types";
 import { host } from "./host";
 import { isLite, markActive, trimNow } from "./perf";
 import { settings } from "./store";
@@ -20,6 +20,8 @@ interface Dock {
   /** the dock plate in window coordinates, so a file dragged from Explorer can land on it */
   plate: { x: number; y: number; width: number; height: number } | null;
   overPlate: boolean;
+  /** no window is open on this dock's screen (auto-hide keeps the dock up then) */
+  desktop: boolean;
 }
 
 const docks = new Map<number, Dock>();
@@ -44,9 +46,18 @@ function hwndOf(win: BrowserWindow): number {
   return Number(handle.length >= 8 ? handle.readBigUInt64LE(0) : handle.readUInt32LE(0));
 }
 
+// follow: the screen the dock went to last, by name and place, since Windows renumbers screens
+function followed(): Display | undefined {
+  const f = settings.value.followDisplay;
+  if (!f) return undefined;
+  const all = screen.getAllDisplays();
+  return all.find((d) => d.label === f.label && d.bounds.x === f.x && d.bounds.y === f.y) ?? all.find((d) => d.bounds.x === f.x && d.bounds.y === f.y);
+}
+
 function dockDisplays(): Display[] {
   const primary = screen.getPrimaryDisplay();
   if (settings.value.displays === "all") return screen.getAllDisplays();
+  if (settings.value.displays === "follow") return [followed() ?? primary];
   return [primary];
 }
 
@@ -112,9 +123,17 @@ function createDock(d: Display): Dock {
   win.setContentProtection(hideFromCapture());
   loadPage(win, `dock?display=${d.id}`);
   win.once("ready-to-show", () => win.showInactive());
-  const dock: Dock = { win, display: d, fullscreen: false, wants: false, plate: null, overPlate: false };
+  const dock: Dock = { win, display: d, fullscreen: false, wants: false, plate: null, overPlate: false, desktop: false };
+  // a dock page that crashed (a GPU driver reset, the PC waking up) comes back by itself
+  win.webContents.on("render-process-gone", (_e, why) => {
+    if (why.reason === "clean-exit") return;
+    setTimeout(() => !win.isDestroyed() && loadPage(win, `dock?display=${dock.display.id}`), 1000);
+  });
+  win.webContents.on("did-finish-load", () => {
+    if (dock.desktop) win.webContents.send("dock:desktop", true);
+  });
   win.on("closed", () => {
-    if (docks.get(d.id)?.win === win) docks.delete(d.id);
+    if (docks.get(dock.display.id)?.win === win) docks.delete(dock.display.id);
   });
   return dock;
 }
@@ -148,6 +167,13 @@ function reserve(dock: Dock): void {
 export function layoutDocks(): void {
   const wanted = dockDisplays();
   const ids = new Set(wanted.map((d) => d.id));
+  // a following dock moves its window to the other screen rather than starting a new one
+  if (wanted.length === 1 && docks.size === 1 && !docks.has(wanted[0].id)) {
+    const [[oldId, dock]] = [...docks];
+    void host.try("removeAppbar", { id: String(oldId) });
+    docks.delete(oldId);
+    docks.set(wanted[0].id, dock);
+  }
   for (const [id, dock] of docks) {
     if (!ids.has(id)) {
       void host.try("removeAppbar", { id: String(id) });
@@ -177,10 +203,48 @@ function relayoutSoon(): void {
 }
 
 export function applyTaskbar(): void {
-  if (settings.value.hideTaskbar) void host.try("hideTaskbar", { mode: settings.value.taskbarMode });
+  const s = settings.value;
+  if (s.hideTaskbar) void host.try("hideTaskbar", { mode: s.taskbarMode });
   else void host.try("restoreTaskbar");
-  // while the dock is the taskbar, Win+1...9 are its keys; otherwise Explorer keeps them
-  void host.try("winKeys", { on: settings.value.hideTaskbar && settings.value.winKeys });
+  // while the dock is the taskbar, Win+1...9 and Win+T are its keys; otherwise Explorer keeps them
+  void host.try("keys", { win: s.hideTaskbar && s.winKeys, altT: s.altT });
+}
+
+/** auto-hide's "show on desktop": tells each dock whether its screen has no window open */
+let lastWindows: WinInfo[] = [];
+function checkDesktop(): void {
+  const s = settings.value;
+  for (const dock of docks.values()) {
+    const phys = screen.dipToScreenRect(null, dock.display.bounds);
+    const open = lastWindows.some((w) => {
+      if (w.minimized || w.x === undefined || w.y === undefined || !w.w || !w.h) return false;
+      const cx = w.x + w.w / 2;
+      const cy = w.y + w.h / 2;
+      return cx >= phys.x && cx < phys.x + phys.width && cy >= phys.y && cy < phys.y + phys.height;
+    });
+    const desktop = s.autoHide && s.showOnDesktop && !open;
+    if (desktop === dock.desktop) continue;
+    dock.desktop = desktop;
+    if (!dock.win.isDestroyed()) dock.win.webContents.send("dock:desktop", desktop);
+  }
+}
+
+/** after sleep: the window is back where it belongs, drawn again, its space kept clear */
+function wakeDocks(): void {
+  for (const dock of docks.values()) {
+    if (dock.win.isDestroyed()) continue;
+    if (dock.win.webContents.isCrashed()) {
+      loadPage(dock.win, `dock?display=${dock.display.id}`);
+      continue;
+    }
+    dock.win.setBounds(geometry(dock.display));
+    dock.win.setAlwaysOnTop(true, "pop-up-menu");
+    if (!dock.fullscreen) dock.win.showInactive();
+    dock.win.webContents.invalidate();
+    dock.win.webContents.send("dock:info", dockInfo(dock.win));
+    reserve(dock);
+  }
+  applyTaskbar();
 }
 
 /** Win+n goes to the dock on the main screen, like the Windows taskbar's keys */
@@ -215,8 +279,38 @@ export function initDocks(): void {
     ) {
       layoutDocks();
     }
-    if (v.hideTaskbar !== prev.hideTaskbar || v.taskbarMode !== prev.taskbarMode || v.winKeys !== prev.winKeys) applyTaskbar();
+    if (v.hideTaskbar !== prev.hideTaskbar || v.taskbarMode !== prev.taskbarMode || v.winKeys !== prev.winKeys || v.altT !== prev.altT) applyTaskbar();
+    if (v.autoHide !== prev.autoHide || v.showOnDesktop !== prev.showOnDesktop || v.displays !== prev.displays) checkDesktop();
   });
+
+  // Win+T: the arrows, Tab, Enter and Esc step through the dock's apps (see Hotkeys.cs)
+  let navOn = false;
+  host.on("nav", (n: { key: string }) => {
+    const dock = hotkeyDock();
+    if (!dock || dock.win.isDestroyed()) return;
+    markActive();
+    const ending = n.key === "enter" || n.key === "esc" || n.key === "cancel";
+    if (settings.value.autoHide) {
+      if (!ending) dock.win.webContents.send("dock:reveal");
+      else setTimeout(() => !dock.win.isDestroyed() && !dock.overPlate && dock.win.webContents.send("dock:conceal"), 1200);
+    }
+    navOn = !ending;
+    dock.win.webContents.send("dock:nav", n);
+  });
+
+  // Alt+T: the To-do card, wherever you are
+  host.on("shortcut", (k: { name: string }) => {
+    const dock = hotkeyDock();
+    if (!dock || dock.win.isDestroyed()) return;
+    markActive();
+    if (settings.value.autoHide) dock.win.webContents.send("dock:reveal");
+    dock.win.webContents.send("dock:shortcut", k.name);
+  });
+
+  // after the PC sleeps or is locked, the dock is put back instead of leaving an empty strip
+  const wake = () => setTimeout(wakeDocks, 1500);
+  powerMonitor.on("resume", wake);
+  powerMonitor.on("unlock-screen", wake);
 
   host.on("hotkey", (k: { index: number; mode: string }) => {
     const dock = hotkeyDock();
@@ -239,11 +333,21 @@ export function initDocks(): void {
     for (const dock of docks.values()) reserve(dock);
   });
 
-  host.on("windows", () => glassActivity());
+  host.on("windows", (list: WinInfo[]) => {
+    glassActivity();
+    lastWindows = Array.isArray(list) ? list : [];
+    checkDesktop();
+  });
   // the Windows key: Start or Search opening brings an auto-hidden dock up, and it goes once they close
   let startShown = false;
   host.on("foreground", (f: { hwnd: number; app: boolean; exe?: string | null }) => {
     glassActivity();
+    // another app coming up (a click somewhere, Alt+Tab) ends Win+T, as on the taskbar
+    if (navOn && f.app) {
+      navOn = false;
+      void host.try("navEnd");
+      hotkeyDock()?.win.webContents.send("dock:nav", { key: "cancel" });
+    }
     if (f.app) lastExternal = f.hwnd;
     for (const dock of docks.values()) dock.win.webContents.send("foreground", f);
     if (!settings.value.autoHide) return;
@@ -267,6 +371,23 @@ export function initDocks(): void {
       } else dock.win.showInactive();
     }
   });
+
+  // follow: holding the pointer against the dock's edge of another screen brings the dock there
+  let followAt: { id: number; since: number } | null = null;
+  setInterval(() => {
+    if (settings.value.displays !== "follow") return void (followAt = null);
+    const p = screen.getCursorScreenPoint();
+    const d = screen.getDisplayNearestPoint(p);
+    const b = d.bounds;
+    const atEdge = settings.value.edge === "top" ? p.y <= b.y + 1 : p.y >= b.y + b.height - 2;
+    const current = docks.values().next().value?.display.id;
+    if (!atEdge || d.id === current) return void (followAt = null);
+    if (!followAt || followAt.id !== d.id) return void (followAt = { id: d.id, since: Date.now() });
+    if (Date.now() - followAt.since < 450) return;
+    followAt = null;
+    settings.set({ followDisplay: { label: d.label, x: b.x, y: b.y } });
+    layoutDocks();
+  }, 100);
 
   // auto-hide: the pointer touching the screen edge brings the dock back
   setInterval(() => {

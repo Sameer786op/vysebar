@@ -1,6 +1,6 @@
 // Pinned apps and open windows, grouped one icon per app the way the taskbar does.
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { app, shell } from "electron";
 import type { AppItem, Pin, WinInfo } from "@shared/types";
@@ -237,6 +237,23 @@ export function initApps(): void {
     if (v.pins !== prev.pins) void publishApps();
   });
   void loadStartApps();
+  markFolderPins();
+}
+
+// folders pinned before stacks existed get marked once, so they open as stacks too
+function markFolderPins(): void {
+  let changed = false;
+  const pins = settings.value.pins.map((p) => {
+    if (p.folder || p.group || p.aumid || !p.path || p.exe) return p;
+    try {
+      if (!statSync(p.path).isDirectory()) return p;
+    } catch {
+      return p;
+    }
+    changed = true;
+    return { ...p, folder: true };
+  });
+  if (changed) settings.set({ pins });
 }
 
 export async function loadStartApps(): Promise<{ name: string; id: string }[]> {
@@ -257,6 +274,16 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 export async function pinFromPath(path: string): Promise<Pin> {
   const ext = extname(path).toLowerCase();
   const pin: Pin = { id: uid(), name: basename(path, ext), path };
+  // a folder opens as a stack of what's inside, not straight into Explorer
+  try {
+    if (statSync(path).isDirectory()) {
+      pin.name = basename(path) || path;
+      pin.folder = true;
+      return pin;
+    }
+  } catch {
+    /* not there (yet): treated as a file */
+  }
   if (ext === ".lnk") {
     try {
       const link = shell.readShortcutLink(path);

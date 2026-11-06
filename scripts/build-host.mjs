@@ -47,6 +47,9 @@ const refs = [
   join(winmd, "Windows.Media.winmd"),
   join(winmd, "Windows.Storage.winmd"),
   join(winmd, "Windows.Devices.winmd"),
+  join(winmd, "Windows.Networking.winmd"),
+  join(winmd, "Windows.Graphics.winmd"),
+  join(winmd, "Windows.System.winmd"),
 ].filter((r) => !r.includes("\\") || existsSync(r));
 
 const args = [

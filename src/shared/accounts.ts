@@ -1,13 +1,17 @@
 // The services a widget can read with your own key: what each one asks for, in one place for
 // the fetchers, the Accounts page and the connect form on each widget's card.
 
-export type ProviderKind = "revenue" | "count" | "balance" | "issues" | "leetcode";
+export type ProviderKind = "revenue" | "count" | "balance" | "issues" | "leetcode" | "usage";
 
 export interface ProviderField {
   key: string;
   label: string;
   placeholder?: string;
   secret?: boolean;
+  /** can be left empty */
+  optional?: boolean;
+  /** a choice instead of free text; the first one is the default */
+  options?: { value: string; label: string }[];
 }
 
 export interface ProviderSpec {
@@ -97,9 +101,78 @@ export const PROVIDERS: ProviderSpec[] = [
     site: "https://developer.x.com/en/portal/dashboard",
   },
   { id: "tiktok", name: "TikTok", kind: "count", group: "Social", color: "#111111", letter: "T", unit: "followers", fields: [{ key: "token", label: "User access token", secret: true }], help: "A user access token with the user.info.stats scope.", site: "https://developers.tiktok.com" },
+  {
+    id: "datafast",
+    name: "DataFast",
+    kind: "count",
+    group: "Analytics",
+    color: "#f2683c",
+    letter: "D",
+    unit: "visitors this week",
+    fields: [{ key: "key", label: "API key", placeholder: "df_...", secret: true }],
+    help: "Your website's settings › API: a key for the site you want to watch.",
+    site: "https://datafa.st/dashboard",
+  },
+  {
+    id: "supabase",
+    name: "Supabase",
+    kind: "count",
+    group: "Developer",
+    color: "#3ecf8e",
+    letter: "S",
+    unit: "API requests this week",
+    fields: [
+      { key: "token", label: "Access token", placeholder: "sbp_...", secret: true },
+      { key: "project", label: "Project ref", placeholder: "Blank for your first project", optional: true },
+    ],
+    help: "Account › Access tokens. The project ref is the id in your project's dashboard address.",
+    site: "https://supabase.com/dashboard/account/tokens",
+  },
   { id: "deepseek", name: "DeepSeek", kind: "balance", group: "AI", color: "#4d6bfe", letter: "D", fields: [{ key: "key", label: "API key", placeholder: "sk-...", secret: true }], help: "API keys in the DeepSeek platform.", site: "https://platform.deepseek.com/api_keys" },
+  {
+    id: "grok",
+    name: "Grok",
+    kind: "balance",
+    group: "AI",
+    color: "#000000",
+    letter: "G",
+    fields: [
+      { key: "key", label: "Management key", secret: true },
+      { key: "team", label: "Team ID", placeholder: "From Settings › Team" },
+    ],
+    help: "In the xAI console: a management key that can read billing (Settings › Management keys) and your team's ID.",
+    site: "https://console.x.ai",
+  },
+  {
+    id: "glm",
+    name: "GLM",
+    kind: "usage",
+    group: "AI",
+    color: "#2b5cff",
+    letter: "Z",
+    fields: [
+      { key: "key", label: "API key", secret: true },
+      { key: "region", label: "Account", options: [{ value: "global", label: "z.ai" }, { value: "china", label: "bigmodel.cn" }] },
+    ],
+    help: "An API key from the account your coding plan is on.",
+    site: "https://z.ai/manage-apikey/apikey-list",
+  },
+  {
+    id: "cursor",
+    name: "Cursor",
+    kind: "usage",
+    group: "AI",
+    color: "#141414",
+    letter: "C",
+    fields: [{ key: "token", label: "Session cookie", placeholder: "WorkosCursorSessionToken value", secret: true }],
+    help: "Cursor's API keys can't read usage, so this uses your sign-in instead: on cursor.com open DevTools › Application › Cookies and copy the WorkosCursorSessionToken value. Signing out there ends it.",
+    site: "https://cursor.com/dashboard",
+  },
   { id: "leetcode", name: "LeetCode", kind: "leetcode", group: "Developer", color: "#ffa116", letter: "L", fields: [{ key: "user", label: "Username" }], help: "Your public profile name; no key needed.", site: "https://leetcode.com" },
 ];
+
+/** every field that has to be filled in is */
+export const isConnected = (spec: ProviderSpec, keys: Record<string, string> | undefined): boolean => spec.fields.every((f) => f.optional || f.options || !!keys?.[f.key]?.trim());
 
 export const providerById = (id: string): ProviderSpec | undefined => PROVIDERS.find((p) => p.id === id);
 export const REVENUE_PROVIDERS = PROVIDERS.filter((p) => p.kind === "revenue");
@@ -126,6 +199,8 @@ export interface BalanceData {
   balance: number;
   currency: string;
   available: boolean;
+  /** what this month has cost so far, when the service says */
+  spent?: number;
 }
 export interface IssuesData {
   kind: "issues";
@@ -140,4 +215,20 @@ export interface LeetcodeData {
   streak: number;
   ranking: number | null;
 }
-export type ProviderData = RevenueData | CountData | BalanceData | IssuesData | LeetcodeData;
+/** an AI plan's limits: how much of each window is used and when it starts over */
+export interface UsageWindow {
+  label: string;
+  /** percent, 0-100 (more when over) */
+  used: number;
+  resetsAt: number | null;
+  detail?: string;
+}
+export interface UsageData {
+  kind: "usage";
+  plan?: string;
+  windows: UsageWindow[];
+  notes?: { label: string; value: string }[];
+  /** the first window over the last day, as VyseBar read it */
+  history?: { t: number; used: number }[];
+}
+export type ProviderData = RevenueData | CountData | BalanceData | IssuesData | LeetcodeData | UsageData;

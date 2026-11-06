@@ -1,9 +1,9 @@
 // Temperature, a wallpaper gallery, GitHub notifications and ChatGPT's Codex limits.
 import { useState } from "react";
-import { Bell, Check, Image as ImageIcon, Loader2, Terminal, Thermometer } from "lucide-react";
+import { Bell, Check, Image as ImageIcon, Loader2, RefreshCw, Terminal, Thermometer } from "lucide-react";
 import { countdown } from "../lib/format";
-import { useNow, useSettings, useTopic } from "../lib/state";
-import { CardHeader, Ring } from "../components/ui";
+import { setSettings, useNow, useSettings, useTopic } from "../lib/state";
+import { CardHeader, Chip, Ring, Sparkline } from "../components/ui";
 import type { CardProps, WidgetDef } from "./types";
 
 type Err = { error: string };
@@ -122,6 +122,47 @@ function WallpaperCard(_: CardProps) {
         </div>
       )}
       {err && <div className="mt-2 text-[11px]" style={{ color: "#ff453a" }}>{err}</div>}
+      <Rotation />
+    </div>
+  );
+}
+
+/** a new wallpaper by itself, every day or week */
+function Rotation() {
+  const s = useSettings();
+  const r = s.wallpaperRotate;
+  const [busy, setBusy] = useState(false);
+  const set = (patch: Partial<typeof r>) => setSettings({ wallpaperRotate: { ...r, ...patch } });
+  return (
+    <div className="mt-3 rounded-[14px] p-3" style={{ background: "var(--chip)" }}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[12px] font-semibold">Change by itself</span>
+        <div className="flex gap-1">
+          {(["off", "day", "week"] as const).map((k) => (
+            <Chip key={k} active={r.every === k} onClick={() => set({ every: k })}>{k === "off" ? "Off" : k === "day" ? "Daily" : "Weekly"}</Chip>
+          ))}
+        </div>
+      </div>
+      {r.every !== "off" && (
+        <div className="mt-2 flex items-center justify-between gap-2">
+          <div className="flex gap-1">
+            <Chip active={r.pick === "today"} onClick={() => set({ pick: "today" })}>Picture of the day</Chip>
+            <Chip active={r.pick === "shuffle"} onClick={() => set({ pick: "shuffle" })}>Shuffle</Chip>
+          </div>
+          <button
+            title="Next wallpaper now"
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void window.vyse.invoke("wallpaper:next").finally(() => setBusy(false));
+            }}
+            className="grid h-7 w-7 place-items-center rounded-full disabled:opacity-50"
+            style={{ background: "var(--chip-hover)" }}
+          >
+            <RefreshCw size={13} className={busy ? "animate-spin" : undefined} />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -148,7 +189,7 @@ function GithubNotificationsTile() {
 // ---------- ChatGPT Codex limits ----------
 
 interface Win { used: number; minutes: number | null; resetsAt: number | null }
-interface Codex { session: Win | null; week: Win | null; plan: string | null; at: number }
+interface Codex { session: Win | null; week: Win | null; plan: string | null; at: number; history?: { t: number; used: number }[] }
 const CODEX = "#10a37f";
 // the log only has the share as of the last reply; once its window has reset, nothing is used
 const until = (ms: number, short = false) => (ms > 48 * 3600_000 ? `${Math.round(ms / 86400_000)} days` : short ? countdown(ms).replace(/:\d\d$/, "") : countdown(ms));
@@ -201,6 +242,15 @@ function CodexCard(_: CardProps) {
             );
           })}
       </div>
+      {c.history && c.history.length > 2 && (
+        <div className="mt-2 rounded-[14px] p-3" style={{ background: "var(--chip)" }}>
+          <div className="mb-1.5 flex justify-between text-[11px] font-semibold" style={muted}>
+            <span>5-hour limit over the last day</span>
+            <span className="tabular">peak {Math.round(Math.max(...c.history.map((p) => p.used)))}%</span>
+          </div>
+          <Sparkline values={c.history.map((p) => p.used)} width={282} height={46} color={CODEX} strokeWidth={2} range={[0, 100]} />
+        </div>
+      )}
       <div className="mt-2 text-center text-[10.5px]" style={{ color: "var(--fg3)" }}>As of your last Codex reply, {new Date(c.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>
     </div>
   );

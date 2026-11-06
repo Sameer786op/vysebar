@@ -77,6 +77,9 @@ export function initSystemTopics(): void {
   defineTopic("storage", poller(() => ({ drives: drives() }), 60_000));
   defineTopic("volume", poller(() => host.try("volume"), 1500));
   defineTopic("radios", poller(() => host.try("radios"), 5000));
+  defineTopic("mic", poller(() => host.try("micState"), 2000));
+  // paired Bluetooth devices and their batteries change slowly; Windows itself reads them every few minutes
+  defineTopic("bluetooth", poller(() => host.try("bluetooth", {}, 20_000), 30_000));
   defineTopic("theme", poller(() => host.try("theme"), 5000));
   defineTopic("brightness", poller(() => host.try("brightness"), 4000));
   defineTopic("keyboard", poller(() => host.try("keyboard"), 1500));

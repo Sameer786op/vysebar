@@ -1,8 +1,11 @@
 // Claude Code usage, read from its own logs on this PC: the 5-hour session, the week, when it resets.
+// Gemini CLI and OpenCode the same way: tokens today and over the week, from their files here.
+import type { ReactNode } from "react";
 import { compact, countdown, relative } from "../lib/format";
 import { setSettings, useCommitted, useNow, useSettings, useStore, useTopic } from "../lib/state";
 import { Burst } from "../components/icons";
 import { Bars, CardHeader, Chip, Empty, Ring, Sparkline } from "../components/ui";
+import { Mark } from "./accounts";
 import type { CardProps, WidgetDef } from "./types";
 
 const CLAUDE = "#d97757";
@@ -135,7 +138,82 @@ function ClaudeCard(_: CardProps) {
   );
 }
 
+// ---------- Gemini CLI and OpenCode, from their logs on this PC ----------
+
+interface LocalUsage {
+  today: number;
+  week: number;
+  requests: number;
+  daily: { date: string; tokens: number }[];
+  topModel: string | null;
+  cost: number | null;
+  at: number | null;
+}
+type L = LocalUsage | { error: string };
+
+function MiniStat({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="rounded-[14px] p-3" style={{ background: "var(--chip)" }}>
+      <div className="text-[11px] font-semibold" style={{ color: "var(--fg2)" }}>{label}</div>
+      <div className="tabular mt-0.5 text-[19px] font-semibold leading-tight">{children}</div>
+    </div>
+  );
+}
+
+function localWidget(o: { type: string; topic: string; name: string; color: string; letter: string; bars: string; where: string }): WidgetDef {
+  const spec = { color: o.color, letter: o.letter };
+  const Tile = () => {
+    const u = useTopic<L>(o.topic);
+    if (!u || "error" in u)
+      return (
+        <div className="flex h-full items-center gap-2 pl-2.5 pr-3">
+          <Mark spec={spec} />
+          <span className="max-w-[120px] truncate text-[11px]" style={{ color: "var(--fg2)" }}>{u ? u.error : "Reading usage..."}</span>
+        </div>
+      );
+    return (
+      <div className="flex h-full items-center gap-2.5 pl-2.5 pr-3.5">
+        <Mark spec={spec} />
+        <div className="flex flex-col leading-none">
+          <span className="tabular text-[15px] font-semibold">{compact(u.today)}</span>
+          <span className="mt-1 text-[10px]" style={{ color: "var(--fg2)" }}>tokens today</span>
+        </div>
+        <Bars values={u.daily.map((d) => d.tokens)} width={42} height={24} color={o.bars} highlight={6} />
+      </div>
+    );
+  };
+  const Card = (_: CardProps) => {
+    const u = useTopic<L>(o.topic);
+    const now = useNow(30_000);
+    if (!u || "error" in u) return <Empty>{u ? u.error : "Reading usage..."}</Empty>;
+    return (
+      <div>
+        <CardHeader title={<span className="flex items-center gap-2"><Mark spec={spec} size={22} /> {o.name}</span>} sub={u.topModel ? `Mostly ${u.topModel} this week` : `Usage from ${o.where} on this PC`} />
+        <div className="grid grid-cols-3 gap-2">
+          <MiniStat label="Today">{compact(u.today)}</MiniStat>
+          <MiniStat label="This week">{compact(u.week)}</MiniStat>
+          {u.cost != null ? <MiniStat label="Cost, week">${u.cost < 10 ? u.cost.toFixed(2) : Math.round(u.cost)}</MiniStat> : <MiniStat label="Replies today">{u.requests}</MiniStat>}
+        </div>
+        <div className="mt-3 rounded-[14px] p-3" style={{ background: "var(--chip)" }}>
+          <div className="mb-1.5 flex justify-between text-[11px] font-semibold" style={{ color: "var(--fg2)" }}>
+            <span>Last 7 days</span>
+            <span className="tabular">{compact(u.week)} tokens</span>
+          </div>
+          <Bars values={u.daily.map((d) => d.tokens)} width={300} height={60} color={o.bars} gap={8} highlight={6} />
+          <div className="mt-1 flex justify-between px-1 text-[9.5px]" style={{ color: "var(--fg3)" }}>
+            {u.daily.map((d) => <span key={d.date}>{new Date(d.date + "T12:00").toLocaleDateString([], { weekday: "narrow" })}</span>)}
+          </div>
+        </div>
+        <div className="mt-2 text-center text-[10.5px]" style={{ color: "var(--fg3)" }}>{u.at ? `Last reply ${relative(u.at - now)} · counts cached tokens too` : "Nothing in the last week"}</div>
+      </div>
+    );
+  };
+  return { type: o.type, name: `${o.name} Usage`, category: "AI", description: `Tokens ${o.name} used today and this week, read from ${o.where} on this PC.`, Tile, Card, cardWidth: 360 };
+}
+
 export const aiWidgets: WidgetDef[] = [
   { type: "claudeUsage", name: "Claude Usage", category: "AI", description: "Your Claude Code session: tokens used and when the 5-hour window resets.", Tile: ClaudeUsageTile, Card: ClaudeCard, cardWidth: 370, cardFocus: true },
   { type: "claudePlan", name: "Claude This Week", category: "AI", description: "Tokens over the last seven days, day by day.", Tile: ClaudePlanTile, Card: ClaudeCard, cardWidth: 370, cardFocus: true },
+  localWidget({ type: "geminiUsage", topic: "gemini", name: "Gemini CLI", color: "#3b7bf6", letter: "✦", bars: "#5b9cff", where: "its chat logs" }),
+  localWidget({ type: "opencodeUsage", topic: "opencode", name: "OpenCode", color: "#2a2727", letter: "O", bars: "var(--fg)", where: "its database" }),
 ];

@@ -19,6 +19,8 @@ export interface Pin {
   /** the .exe a shortcut points at, to match running windows */
   exe?: string;
   args?: string;
+  /** a folder: a click opens it as a stack of what's inside */
+  folder?: boolean;
   /** apps grouped together, iPhone style */
   group?: { name: string; items: Pin[] };
 }
@@ -67,8 +69,14 @@ export interface Settings {
   spacing: number;
   distance: number;
   autoHide: boolean;
+  /** with auto-hide: the dock stays up while no window is open on its screen */
+  showOnDesktop: boolean;
   floatOver: boolean;
-  displays: "primary" | "all";
+  /** primary: one dock on the main screen; all: one per screen; follow: one dock that moves to
+   *  the screen where you hold the pointer against the edge */
+  displays: "primary" | "all" | "follow";
+  /** the screen a following dock went to last, found again by name and place after a restart */
+  followDisplay: { label: string; x: number; y: number } | null;
   lock: boolean;
   labels: boolean;
   previews: boolean;
@@ -79,6 +87,14 @@ export interface Settings {
   taskbarMode: "hidden" | "autohide";
   /** Win+1...9 open the dock's apps (while it replaces the taskbar), as on the Windows taskbar */
   winKeys: boolean;
+  /** Alt+T opens the To-do card from anywhere */
+  altT: boolean;
+  /** which switches sit on the Quick Toggles tile, in order */
+  quickToggles: string[];
+  /** the accent colour follows the cover of what's playing */
+  albumAccent: boolean;
+  /** a new wallpaper on its own every day or week: the gallery's picture of the day, or any of its last eight */
+  wallpaperRotate: { every: "off" | "day" | "week"; pick: "today" | "shuffle"; last: number; current?: string };
   /** lite trades live glass and some animation for memory; auto picks lite on low-end PCs */
   performance: "auto" | "smooth" | "lite";
   clock24: boolean;
@@ -101,7 +117,7 @@ export interface Settings {
   startTile: "windows" | "vyse" | "custom" | "google";
   startImage: string | null;
   /** your own Google Cloud OAuth client (Desktop app), for "Sign in with Google" */
-  google: { clientId: string; clientSecret: string };
+  google: { clientId: string; clientSecret: string; /** the Search Console widget's site */ searchSite?: string };
   widgets: WidgetInstance[];
   pins: Pin[];
   accounts: {
@@ -129,6 +145,11 @@ export interface WinInfo {
   minimized: boolean;
   active: boolean;
   flashing: boolean;
+  /** where the window is, in screen pixels */
+  x?: number;
+  y?: number;
+  w?: number;
+  h?: number;
 }
 
 export interface AppItem {
@@ -276,8 +297,10 @@ export const DEFAULT_SETTINGS: Settings = {
   spacing: 4,
   distance: 8,
   autoHide: false,
+  showOnDesktop: true,
   floatOver: false,
   displays: "primary",
+  followDisplay: null,
   lock: false,
   labels: true,
   previews: true,
@@ -285,6 +308,10 @@ export const DEFAULT_SETTINGS: Settings = {
   hideTaskbar: true,
   taskbarMode: "hidden",
   winKeys: true,
+  altT: true,
+  quickToggles: ["wifi", "bluetooth", "dark", "mute"],
+  albumAccent: false,
+  wallpaperRotate: { every: "off", pick: "today", last: 0 },
   performance: "auto",
   clock24: false,
   clockSeconds: false,

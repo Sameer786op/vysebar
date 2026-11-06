@@ -5,7 +5,7 @@ import {
   Bell, Calendar, ChevronDown, ChevronUp, Clock, ExternalLink, Info, KeyRound, LayoutGrid, MapPin, Monitor, Palette, Plus, Search, Trash2, X,
 } from "lucide-react";
 import { ACCENTS, type City, type DockStyle, type GoogleProfile, type Settings, type UpdateState } from "@shared/types";
-import { PROVIDERS, type ProviderSpec } from "@shared/accounts";
+import { PROVIDERS, isConnected, type ProviderSpec } from "@shared/accounts";
 import { liteOf, setSettings, uid, useCommitted, useSettings, useTopic } from "../lib/state";
 import { play } from "../lib/sound";
 import { Toggle } from "../components/ui";
@@ -173,6 +173,9 @@ function Appearance({ s }: { s: Settings }) {
             ))}
           </div>
         </Row>
+        <Row label="Match the album art" sub="While music plays, the accent takes the cover's colour; yours comes back when it stops">
+          <Toggle on={s.albumAccent} onChange={set("albumAccent")} />
+        </Row>
       </Group>
       <Group title="Start button">
         <Row label="Icon">
@@ -210,7 +213,9 @@ function DockPage({ s }: { s: Settings }) {
       <Group title="Position">
         <Row label="Screen edge"><Seg value={s.edge} options={[["bottom", "Bottom"], ["top", "Top"]]} onChange={set("edge")} /></Row>
         <Row label="Full width" sub="Edge to edge, apps on the left and widgets on the right"><Toggle on={s.fullWidth} onChange={set("fullWidth")} /></Row>
-        <Row label="Show on"><Seg value={s.displays} options={[["primary", "Main display"], ["all", "All displays"]]} onChange={set("displays")} /></Row>
+        <Row label="Show on" sub={s.displays === "follow" ? `Hold the pointer against the ${s.edge === "top" ? "top" : "bottom"} of another screen and the dock moves there` : undefined}>
+          <Seg value={s.displays} options={[["primary", "Main display"], ["all", "All displays"], ["follow", "Follow pointer"]]} onChange={set("displays")} />
+        </Row>
       </Group>
       <Group title="Size">
         <Row label="Size">
@@ -222,6 +227,9 @@ function DockPage({ s }: { s: Settings }) {
       </Group>
       <Group title="Behaviour" footer="Windows keeps maximised apps clear of the dock unless it auto-hides or floats over them.">
         <Row label="Automatically hide" sub="Comes back when the pointer touches the screen edge"><Toggle on={s.autoHide} onChange={set("autoHide")} /></Row>
+        {s.autoHide && (
+          <Row label="Stay up on the desktop" sub="While no window is open on the screen, the dock doesn't hide"><Toggle on={s.showOnDesktop} onChange={set("showOnDesktop")} /></Row>
+        )}
         <Row label="Float over windows" sub="Don't reserve space for the dock"><Toggle on={s.floatOver} disabled={s.autoHide} onChange={set("floatOver")} /></Row>
         <Row label="Replace the Windows taskbar" sub="VyseBar takes its place; it comes back when VyseBar quits"><Toggle on={s.hideTaskbar} onChange={set("hideTaskbar")} /></Row>
         {s.hideTaskbar && (
@@ -230,8 +238,9 @@ function DockPage({ s }: { s: Settings }) {
           </Row>
         )}
         {s.hideTaskbar && (
-          <Row label="Win+1 to 9 open dock apps" sub="Like the taskbar: add Shift for a new window, Alt for the app's menu"><Toggle on={s.winKeys} onChange={set("winKeys")} /></Row>
+          <Row label="Taskbar keys" sub="Win+1 to 9 open dock apps (Shift: new window, Alt: the app's menu); Win+T steps through them with the arrow keys"><Toggle on={s.winKeys} onChange={set("winKeys")} /></Row>
         )}
+        <Row label="Alt+T opens To-do" sub="From any app; press it again to close the card"><Toggle on={s.altT} onChange={set("altT")} /></Row>
         <Row label="Lock the dock" sub="No dragging, reordering or removing"><Toggle on={s.lock} onChange={set("lock")} /></Row>
       </Group>
       <Group title="Apps">
@@ -423,7 +432,7 @@ function GoogleGroup({ s }: { s: Settings }) {
   const saveClient = (k: "clientId" | "clientSecret") => (v: string) => setSettings({ google: { ...s.google, [k]: v.trim() } });
   const button = "rounded-[7px] px-3 py-[5px] text-[12px] font-semibold disabled:opacity-40";
   return (
-    <Group title="Google" footer="VyseBar asks Google only for your name, email address and profile photo. They stay on this PC, and the sign-in is stored encrypted for your Windows account.">
+    <Group title="Google" footer="Signing in asks Google only for your name, email address and profile photo. The Gmail and Search Console widgets each ask for read-only access of their own, from their card, when you add them. Everything stays on this PC, and the sign-in is stored encrypted for your Windows account.">
       {profile ? (
         <Row
           label={
@@ -508,7 +517,7 @@ function AccountsPage({ s }: { s: Settings }) {
 
 function ProviderRow({ spec, s }: { spec: ProviderSpec; s: Settings }) {
   const keys = s.providers[spec.id] ?? {};
-  const connected = spec.fields.every((f) => keys[f.key]);
+  const connected = !!s.providers[spec.id] && isConnected(spec, keys);
   const [open, setOpen] = useState(false);
   const save = (k: string) => (v: string) => setSettings({ providers: { ...s.providers, [spec.id]: { ...keys, [k]: v } } });
   return (
@@ -535,8 +544,12 @@ function ProviderRow({ spec, s }: { spec: ProviderSpec; s: Settings }) {
         <div className="space-y-2 px-3.5 pb-3">
           {spec.fields.map((f) => (
             <div key={f.key} className="flex items-center gap-3">
-              <span className="w-[120px] text-[12px]" style={{ color: "var(--fg2)" }}>{f.label}</span>
-              <Field value={keys[f.key] ?? ""} onSave={save(f.key)} placeholder={f.placeholder} secret={f.secret} width={260} />
+              <span className="w-[120px] text-[12px]" style={{ color: "var(--fg2)" }}>{f.label}{f.optional && <span style={{ color: "var(--fg3)" }}> (optional)</span>}</span>
+              {f.options ? (
+                <Seg value={keys[f.key] ?? f.options[0].value} options={f.options.map((o) => [o.value, o.label] as [string, string])} onChange={save(f.key)} />
+              ) : (
+                <Field value={keys[f.key] ?? ""} onSave={save(f.key)} placeholder={f.placeholder} secret={f.secret} width={260} />
+              )}
             </div>
           ))}
           <p className="text-[11.5px] leading-snug" style={{ color: "var(--fg3)" }}>

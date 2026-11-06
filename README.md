@@ -41,6 +41,10 @@ killed: the small native helper notices and restores it.
   the task. Drag tiles to reorder them, drag a pin off the dock to unpin it, and drop files on
   the apps to pin them. Dragging a file over an open app brings its window up so you can drop it
   there.
+- **Folder stacks.** A folder pinned to the dock fans out as a stack of what's inside when you
+  click it: open a file from there, or go into a subfolder without leaving the stack.
+  Shift-click opens the folder in File Explorer instead. The **Folder** widget does the same on
+  the widget side of the dock, and you can add as many as you like.
 - **Jump lists.** Right-click an app for what the taskbar's jump list shows: its recent files
   (opened in that app), its own lists (a browser's recently closed tabs) and its Tasks, such as
   **New Incognito window** or a messaging app's chats. File Explorer lists your Quick access
@@ -49,20 +53,40 @@ killed: the small native helper notices and restores it.
   open the apps on the dock in the order you see them: open, switch to, or minimise if it's
   already in front, and each press moves on to the app's next window. Add **Shift** for a new
   window, **Ctrl** for the window you used last, or **Alt** for its right-click menu. Without this,
-  Windows would open its own taskbar's pins, in its own order. **Settings → Dock** turns it off.
+  Windows would open its own taskbar's pins, in its own order. **Win+T** works as on the taskbar
+  too: it highlights the first app, and pressing it again or the arrow keys move along the dock;
+  **Up** (**Down** on a dock at the top) or **Tab** goes into the app's window previews to pick
+  one, **Enter** opens what's highlighted and **Esc** lets go. **Settings → Dock → Taskbar keys** turns
+  these off.
+- **Alt+T** opens the To-do card from any app, ready to type into; press it again to close it.
+  **Settings → Dock** turns it off.
 - **Moving and sizing.** Drag the dock by an empty spot to the top or bottom of the screen.
   **Settings → Dock** has Small, Medium and Large sizes and a slider in between. If you add more
   widgets than fit, the dock shrinks to stay on screen.
+- **More than one screen.** **Settings → Dock → Show on** puts the dock on the main display, on
+  every display, or picks **Follow pointer**: one dock that moves to another screen when you hold
+  the pointer against that screen's bottom (or top) edge for a moment. It remembers the screen it
+  went to, by name and place, after a restart.
 - **System tray.** The System Tray widget brings back the icons of apps running in the
   background (Discord, Steam, OneDrive...), which the hidden taskbar would otherwise lock away.
   Icons Windows keeps on the taskbar sit on the dock; the chevron opens all of them. Click opens
   the app, right-click opens its own menu. Windows' own icons (volume, network, battery) are left
   out, since the dock has widgets for those.
 - **Auto-hide.** The dock comes back when the pointer touches the screen edge, and also when you
-  press the Windows key, until Start or Search closes.
+  press the Windows key, until Start or Search closes. With **Stay up on the desktop** (on unless
+  you turn it off) it doesn't hide at all while no window is open on its screen. After the PC
+  sleeps or is locked, the dock is put back in place instead of leaving an empty strip.
 - **Widgets.** Click a widget for its card, right-click it for quick actions. Drag to reorder.
-  Right-click the dock → **Widgets...** opens the picker, where you can drag in any of about 100
-  widgets.
+  Right-click the dock → **Widgets...** opens the picker, where you can drag in any of well over
+  100 widgets. Its **Your apps** tab lists every app installed on the PC, so any of them can be a
+  widget tile of its own.
+- **Looks.** **Settings → Appearance → Match the album art** lets the accent colour take the
+  cover's colour while music plays and gives yours back when it stops. The Wallpaper Gallery card
+  can change the wallpaper by itself every day or every week, to the picture of the day or a
+  random one of the last eight.
+- **Text from screenshots.** Hover a picture in the Recent Screenshots card for **Copy text**,
+  or right-click the tile to copy the text of the latest one. Windows' own OCR reads it, in the
+  languages you have installed, and nothing leaves the PC.
 - **Sign in with Google.** **Settings → Accounts → Google** puts your name and photo on the
   dock: your photo on the Start button (Appearance → Start button switches it back) and a
   "Good evening, Alex" greeting on the clock and calendar card. VyseBar asks Google only for
@@ -70,6 +94,13 @@ killed: the small native helper notices and restores it.
   so the first time you make a free one in Google Cloud (a Desktop app client; the page lists the
   four steps with links) and paste its ID and secret. The sign-in opens in your browser, and the
   saved sign-in is encrypted for your Windows account.
+- **Gmail and Search Console.** These two widgets use the same Google sign-in and ask, from their
+  card, for read-only access of their own (Gmail: message headers only, never the mail itself).
+  Turn on the **Gmail API** or the **Google Search Console API** in your Cloud project first; the
+  card links to it. While your OAuth app is in Testing, Google ends this access after seven days,
+  so either allow it again from the card or publish the app (**Google Auth Platform → Audience →
+  Publish app**). A published app you haven't had verified shows a warning at sign-in: choose
+  **Advanced → Go to** your app's name.
 - **Weather where you are.** With **Settings → Clock & Weather → Use my location** on (the
   default), the weather follows the PC: Windows location when Location is on for desktop apps
   (rounded to about a kilometre), otherwise the city of your internet connection's IP address,
@@ -92,15 +123,15 @@ killed: the small native helper notices and restores it.
 | Clocks | Clock, Today, Date, Day Number, 7 Days, Flip Clock, Segment Clock, Analog Classic / Dark / Minimal, Clock & Weather, World Clock(s), World Time |
 | Weather | Weather, Weather Details, Weather Status, Today's Forecast, Hourly, Forecast, Sunrise & Sunset |
 | Productivity | Calendar, Day Timeline, Todos, Notes, Timer, Stopwatch, Pomodoro, Screen Time, Currency |
-| System | System Tray, System Stats, CPU, Memory, Network, Storage, Battery, Temperature, Quick Toggles (Wi-Fi, Bluetooth, airplane, dark mode, keep awake, microphone, desktop icons, display mode), Brightness, Light / Dark, Keyboard Language, Recycle Bin, Day / Month / Year Progress |
+| System | System Tray, System Stats, CPU, Memory, Network, Storage (the tile shows any drive you pick), Battery, Temperature, Quick Toggles (pick which switches sit on the tile: Wi-Fi, Bluetooth, airplane, dark mode, mute, microphone, Do not disturb, energy saver, keep awake, mobile hotspot, Ethernet, camera, desktop icons; the card has all of them plus sound, brightness and display mode), Bluetooth (paired devices and their battery levels), Microphone (one click mutes it; right-click for its level and input), Brightness, Light / Dark, Keyboard Language, Recycle Bin, Day / Month / Year Progress |
 | Media & Audio | Now Playing (+ Compact), Mini Player, Music Controls, Volume, Sound Output (with per-app mixer) |
-| Apps & Files | Search, Commands, Downloads, Recent Screenshots, Recently Opened, Screenshot, Show Desktop, Task View |
-| AI | Claude Usage, Claude This Week (from Claude Code's local logs), ChatGPT Codex limits (from Codex's local logs), DeepSeek Balance |
-| Developer | GitHub Activity, GitHub Overview, GitHub Notifications, Linear Issues, LeetCode |
+| Apps & Files | App (any installed app as a tile), Folder (a stack of what's inside), Search, Commands, Downloads, Recent Screenshots (with Copy text), Recently Opened, Screenshot, Show Desktop, Task View |
+| AI | Claude Usage, Claude This Week (from Claude Code's local logs), ChatGPT Codex limits (from Codex's local logs, with a chart of the last day), Gemini CLI and OpenCode tokens (from their local logs, no key needed), Cursor Usage and GLM Usage (plan limits with a chart of the last day), Grok and DeepSeek Balance |
+| Developer | GitHub Activity, GitHub Overview, GitHub Notifications, Linear Issues, LeetCode, Supabase (API requests) |
 | Finance & Stocks | Total Revenue, Crypto, Stock, Stock Chart, Watchlist, and Revenue + Chart widgets for Stripe, Polar, Lemon Squeezy, Paddle, Gumroad, Shopify and Dodo Payments |
-| Analytics | Plausible (visitors), Dub (link clicks) |
+| Analytics | Plausible and DataFast (visitors), Dub (link clicks), Search Console (clicks, impressions and position from Google) |
 | Social | YouTube, Instagram, X and TikTok followers |
-| Online & Mail | Wallpaper Gallery (Bing's picture of the day, one click to set it), Resend (emails sent) |
+| Online & Mail | Gmail (unread mail), Wallpaper Gallery (Bing's picture of the day, one click to set it, or a new one every day or week), Resend (emails sent) |
 
 Calendars come from ICS addresses (Google, Outlook and iCloud all publish one), added in
 **Settings → Calendars**.
@@ -207,11 +238,14 @@ gh release create "v$v" --title "VyseBar $v" --notes "What changed" \
 - `native`: VyseHost, the C# helper that talks to Windows: window tracking, taskbar hiding,
   Core Audio, media sessions, radios, brightness, power, temperature, the microphone, desktop
   icons, the wallpaper, Quick access, jump-list recent files (`JumpLists.cs`) and tasks
-  (`JumpTasks.cs`), Win+1...9 (`Hotkeys.cs`), peek (`Peek.cs`), the notification area
-  (`Tray.cs`), the strip of screen behind the live glass (`Grab.cs`), window previews
-  (`Thumbs.cs`) and memory trimming. It speaks JSON lines over stdio. Anything slow runs
+  (`JumpTasks.cs`), Win+1...9, Win+T and Alt+T (`Hotkeys.cs`), peek (`Peek.cs`), the
+  notification area (`Tray.cs`), the strip of screen behind the live glass (`Grab.cs`), window
+  previews (`Thumbs.cs`), Bluetooth batteries, Do not disturb, energy saver, the hotspot, the
+  camera switch and Ethernet (`Devices.cs`), text from screenshots (`Ocr.cs`) and memory
+  trimming. It speaks JSON lines over stdio. Anything slow runs
   there rather than in Electron's main process, because that process also passes the mouse
   through the dock: when it stalls, the whole pointer stutters.
+- `scripts`: helper and icon build scripts.
 
 The tray widget works the way other taskbar replacements (RetroBar) do: while it is on screen,
 VyseHost keeps a hidden window of the taskbar's class (`Shell_TrayWnd`) in front of Explorer's,
@@ -224,6 +258,7 @@ Unread badges on app icons were looked at and left out: with the taskbar hidden,
 publishing its buttons (and their badges) to accessibility tools, and the remaining way in
 (taking over the taskbar's ITaskbarList messages) would only see apps started after VyseBar and
 could break features apps rely on.
-- `scripts`: helper and icon build scripts.
 
-Settings and data live in `%APPDATA%\VyseBar`.
+Settings and data live in `%APPDATA%\VyseBar`. So does `vysebar.log`, a short record of when
+VyseBar started, quit, updated or crashed (no window titles, file names or anything you typed),
+which helps when the dock didn't come up after signing in. It keeps itself under 256 KB.

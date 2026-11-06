@@ -1,12 +1,12 @@
 // Widgets for services you connect with your own key: revenue from six stores and their total,
-// site analytics, followers, email, Linear issues, the DeepSeek balance and LeetCode.
+// site analytics, followers, email, Supabase, Linear issues, AI balances and plan limits, LeetCode.
 // Each card has its own connect form, so a key can be added right where the widget is.
 import { useState, type FC, type ReactNode } from "react";
 import { motion } from "motion/react";
 import { ExternalLink, Flame, KeyRound, RefreshCw, TrendingDown, TrendingUp } from "lucide-react";
-import { PROVIDERS, type BalanceData, type CountData, type IssuesData, type LeetcodeData, type ProviderData, type ProviderSpec, type RevenueData } from "@shared/accounts";
-import { compact, money } from "../lib/format";
-import { setSettings, useCommitted, useSettings, useTopic } from "../lib/state";
+import { PROVIDERS, isConnected, type BalanceData, type CountData, type IssuesData, type LeetcodeData, type ProviderData, type ProviderSpec, type RevenueData, type UsageData } from "@shared/accounts";
+import { compact, countdown, money } from "../lib/format";
+import { setSettings, useCommitted, useNow, useSettings, useTopic } from "../lib/state";
 import { Bars, CardHeader, Ring, Sparkline } from "../components/ui";
 import type { CardProps, Category, TileProps, WidgetDef } from "./types";
 
@@ -65,12 +65,13 @@ function Stat({ label, children, sub }: { label: string; children: ReactNode; su
 function ConnectForm({ spec, onDone }: { spec: ProviderSpec; onDone?: () => void }) {
   const s = useSettings();
   const saved = s.providers[spec.id] ?? {};
-  const [vals, setVals] = useState<Record<string, string>>(saved);
-  const connected = spec.fields.every((f) => saved[f.key]);
-  const ready = spec.fields.every((f) => vals[f.key]?.trim());
+  // a choice starts on its first option
+  const [vals, setVals] = useState<Record<string, string>>(() => ({ ...Object.fromEntries(spec.fields.filter((f) => f.options).map((f) => [f.key, f.options![0].value])), ...saved }));
+  const connected = !!s.providers[spec.id] && isConnected(spec, saved);
+  const ready = isConnected(spec, vals);
   const save = () => {
     if (!ready) return;
-    setSettings({ providers: { ...s.providers, [spec.id]: Object.fromEntries(spec.fields.map((f) => [f.key, vals[f.key].trim()])) } });
+    setSettings({ providers: { ...s.providers, [spec.id]: Object.fromEntries(spec.fields.map((f) => [f.key, (vals[f.key] ?? "").trim()])) } });
     onDone?.();
   };
   const disconnect = () => {
@@ -81,9 +82,21 @@ function ConnectForm({ spec, onDone }: { spec: ProviderSpec; onDone?: () => void
   return (
     <div className="rounded-[14px] p-3" style={{ background: "var(--chip)" }}>
       <div className="space-y-2">
-        {spec.fields.map((f, i) => (
+        {spec.fields.map((f, i) =>
+          f.options ? (
+            <div key={f.key}>
+              <span className="mb-1 block text-[11px] font-semibold" style={muted}>{f.label}</span>
+              <div className="flex gap-1.5">
+                {f.options.map((o) => (
+                  <button key={o.value} onClick={() => setVals({ ...vals, [f.key]: o.value })} className="rounded-full px-2.5 py-[4px] text-[12px] font-medium" style={{ background: vals[f.key] === o.value ? "var(--accent)" : "var(--track)", color: vals[f.key] === o.value ? "white" : undefined }}>
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
           <label key={f.key} className="block">
-            <span className="mb-1 block text-[11px] font-semibold" style={muted}>{f.label}</span>
+            <span className="mb-1 block text-[11px] font-semibold" style={muted}>{f.label}{f.optional && <span className="font-normal" style={{ color: "var(--fg3)" }}> · optional</span>}</span>
             <input
               autoFocus={i === 0}
               type={f.secret ? "password" : "text"}
@@ -96,7 +109,8 @@ function ConnectForm({ spec, onDone }: { spec: ProviderSpec; onDone?: () => void
               style={{ background: "var(--track)" }}
             />
           </label>
-        ))}
+          ),
+        )}
       </div>
       <p className="mt-2 text-[11px] leading-snug" style={muted}>{spec.help}</p>
       <div className="mt-2.5 flex items-center gap-2">
@@ -126,7 +140,7 @@ function AccountCard({ spec, v, children }: { spec: ProviderSpec; v: ProviderDat
     <div>
       <CardHeader
         title={<span className="flex items-center gap-2"><Mark spec={spec} size={22} /> {spec.name}</span>}
-        sub={spec.unit ? cap(spec.unit) : spec.kind === "revenue" ? "Last 30 days" : spec.group}
+        sub={spec.unit ? cap(spec.unit) : spec.kind === "revenue" ? "Last 30 days" : v && !isErr(v) && v.kind === "usage" && v.plan ? v.plan : spec.group}
         right={
           <span className="flex items-center gap-1">
             {v && !(isErr(v) && v.connect) && (
@@ -324,7 +338,7 @@ function countWidget(spec: ProviderSpec): WidgetDef {
                 {d.series && d.series.length > 1 && (
                   <div className="mt-3">
                     <Sparkline values={d.series} width={306} height={60} color={spec.color === "#000000" ? "var(--fg)" : spec.color} strokeWidth={2} />
-                    <div className="mt-1 flex justify-between text-[9.5px]" style={{ color: "var(--fg3)" }}><span>Two weeks ago</span><span>Today</span></div>
+                    <div className="mt-1 flex justify-between text-[9.5px]" style={{ color: "var(--fg3)" }}><span>{d.series.length > 7 ? "Two weeks ago" : "A week ago"}</span><span>Today</span></div>
                   </div>
                 )}
               </div>
@@ -334,11 +348,11 @@ function countWidget(spec: ProviderSpec): WidgetDef {
       </AccountCard>
     );
   };
-  const category: Category = spec.group === "Social" ? "Social" : spec.group === "Analytics" ? "Analytics" : "Online & Mail";
+  const category: Category = spec.group === "Social" ? "Social" : spec.group === "Analytics" ? "Analytics" : spec.id === "resend" ? "Online & Mail" : "Developer";
   return { type: `acct-${spec.id}`, name: spec.group === "Social" ? `${spec.name} Followers` : spec.name, category, description: `${cap(unit)} on ${spec.name}.`, Tile, Card, cardWidth: 360, cardFocus: true, account: spec.id };
 }
 
-// ---------- DeepSeek balance ----------
+// ---------- API balances: DeepSeek, Grok ----------
 
 function balanceWidget(spec: ProviderSpec): WidgetDef {
   const Tile: FC<TileProps> = () => {
@@ -361,15 +375,104 @@ function balanceWidget(spec: ProviderSpec): WidgetDef {
         {(d) =>
           d.kind === "balance" && (
             <div className="grid grid-cols-2 gap-2">
-              <Stat label="Balance">{money(d.balance, d.currency)}</Stat>
-              <Stat label="API">{<span style={{ color: d.available ? up : down }}>{d.available ? "Available" : "Top up"}</span>}</Stat>
+              <Stat label={d.spent != null ? "Prepaid credit" : "Balance"}>{money(d.balance, d.currency)}</Stat>
+              {d.spent != null ? (
+                <Stat label="This month" sub={<span style={muted}>billed after credit</span>}>{money(d.spent, d.currency)}</Stat>
+              ) : (
+                <Stat label="API">{<span style={{ color: d.available ? up : down }}>{d.available ? "Available" : "Top up"}</span>}</Stat>
+              )}
             </div>
           )
         }
       </AccountCard>
     );
   };
-  return { type: `acct-${spec.id}`, name: `${spec.name} Balance`, category: "AI", description: "What's left on your DeepSeek API balance.", Tile, Card, cardWidth: 340, cardFocus: true, account: spec.id };
+  return { type: `acct-${spec.id}`, name: `${spec.name} Balance`, category: "AI", description: `What's left on your ${spec.name} API balance${spec.id === "grok" ? ", and this month's bill" : ""}.`, Tile, Card, cardWidth: 340, cardFocus: true, account: spec.id };
+}
+
+// ---------- AI plan limits: GLM, Cursor ----------
+
+/** a dark brand colour can't be seen on the dark glass, so it draws in the text colour */
+const ink = (c: string) => (/^#[01][0-9a-f]{5}$/i.test(c) ? "var(--fg)" : c);
+const meterColor = (used: number, spec: ProviderSpec) => (used >= 90 ? down : used >= 75 ? "#ff9f0a" : ink(spec.color));
+const until = (ms: number) => (ms > 48 * 3600_000 ? `${Math.round(ms / 86400_000)} days` : ms > 3600_000 ? countdown(ms).replace(/:\d\d$/, "") : `${Math.max(1, Math.round(ms / 60_000))} min`);
+const resetText = (at: number | null, now: number) => (!at ? null : at > now ? `resets in ${until(at - now)}` : "reset");
+
+function UsageBody({ d, spec, now }: { d: UsageData; spec: ProviderSpec; now: number }) {
+  const hist = d.history ?? [];
+  return (
+    <>
+      <div className="space-y-2.5 rounded-[14px] p-3.5" style={{ background: "var(--chip)" }}>
+        {d.windows.map((w, i) => (
+          <div key={w.label}>
+            <div className="flex items-baseline justify-between">
+              <span className={i === 0 ? "text-[12.5px] font-semibold" : "text-[12px]"}>{w.label}</span>
+              <span className={`tabular font-semibold ${i === 0 ? "text-[17px]" : "text-[12.5px]"}`} style={{ color: w.used >= 90 ? down : undefined }}>{Math.round(w.used)}%</span>
+            </div>
+            <div className={`mt-1 overflow-hidden rounded-full ${i === 0 ? "h-[8px]" : "h-[5px]"}`} style={{ background: "var(--track)" }}>
+              <motion.div className="h-full rounded-full" initial={{ width: 0 }} animate={{ width: `${Math.min(100, w.used)}%` }} transition={{ type: "spring", stiffness: 140, damping: 22 }} style={{ background: meterColor(w.used, spec) }} />
+            </div>
+            {(w.detail || (w.resetsAt && w.resetsAt !== d.windows[i - 1]?.resetsAt)) && (
+              <div className="tabular mt-1 flex justify-between text-[10.5px]" style={muted}>
+                <span>{w.detail}</span>
+                <span>{w.resetsAt !== d.windows[i - 1]?.resetsAt ? resetText(w.resetsAt, now) : null}</span>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      {hist.length > 2 && (
+        <div className="mt-3 rounded-[14px] p-3" style={{ background: "var(--chip)" }}>
+          <div className="mb-1.5 flex justify-between text-[11px] font-semibold" style={muted}>
+            <span>{d.windows[0]?.label} over the last day</span>
+            <span className="tabular">peak {Math.round(Math.max(...hist.map((p) => p.used)))}%</span>
+          </div>
+          <Sparkline values={hist.map((p) => p.used)} width={306} height={52} color={ink(spec.color)} strokeWidth={2} range={[0, 100]} />
+          <div className="mt-1 flex justify-between text-[9.5px]" style={{ color: "var(--fg3)" }}>
+            <span>{new Date(hist[0].t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+            <span>Now</span>
+          </div>
+        </div>
+      )}
+      {!!d.notes?.length && (
+        <div className="mt-3 space-y-1 px-1 text-[12px]">
+          {d.notes.map((n) => (
+            <div key={n.label} className="flex justify-between">
+              <span style={muted}>{n.label}</span>
+              <b className="tabular">{n.value}</b>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function usageWidget(spec: ProviderSpec): WidgetDef {
+  const Tile: FC<TileProps> = () => {
+    const u = useAcct<UsageData>(spec.id);
+    const now = useNow(30_000);
+    if (!u || isErr(u)) return <TileNote spec={spec} v={u} />;
+    const w = u.windows[0];
+    return (
+      <div className="flex h-full items-center gap-2.5 pl-2.5 pr-3.5">
+        <Ring value={(w?.used ?? 0) / 100} size={34} stroke={3.5} color={meterColor(w?.used ?? 0, spec)}>
+          <span className="text-[11px] font-bold" style={{ color: ink(spec.color) }}>{spec.letter}</span>
+        </Ring>
+        <div className="flex flex-col leading-none">
+          <span className="tabular text-[15px] font-semibold">{w ? `${Math.round(w.used)}%` : "-"}</span>
+          <span className="tabular mt-1 max-w-[110px] truncate text-[10px]" style={muted}>{resetText(w?.resetsAt ?? null, now) ?? w?.label ?? spec.name}</span>
+        </div>
+      </div>
+    );
+  };
+  const Card: FC<CardProps> = () => {
+    const u = useAcct<UsageData>(spec.id);
+    const now = useNow(30_000);
+    return <AccountCard spec={spec} v={u}>{(d) => d.kind === "usage" && <UsageBody d={d} spec={spec} now={now} />}</AccountCard>;
+  };
+  const description = spec.id === "cursor" ? "How much of Cursor's included usage is gone, by pool, and when the cycle starts over." : `Your ${spec.name} limits: the 5-hour window and the month, and when each resets.`;
+  return { type: `acct-${spec.id}`, name: `${spec.name} Usage`, category: "AI", description, Tile, Card, cardWidth: 360, cardFocus: true, account: spec.id };
 }
 
 // ---------- Linear ----------
@@ -475,6 +578,7 @@ export const accountWidgets: WidgetDef[] = [
     if (p.kind === "count") return [countWidget(p)];
     if (p.kind === "balance") return [balanceWidget(p)];
     if (p.kind === "issues") return [issuesWidget(p)];
+    if (p.kind === "usage") return [usageWidget(p)];
     return [leetcodeWidget(p)];
   }),
 ];

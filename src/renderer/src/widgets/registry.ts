@@ -13,9 +13,12 @@ import { weatherWidgets } from "./weather";
 import { accountWidgets } from "./accounts";
 import { extraWidgets } from "./extras";
 import { trayWidgets } from "./tray";
+import { shortcutWidgets } from "./shortcuts";
+import { googleWidgets } from "./google";
 
 export const WIDGETS: WidgetDef[] = [
   appsWidget,
+  ...shortcutWidgets,
   ...fileWidgets,
   ...clockWidgets,
   ...calendarWidgets,
@@ -27,6 +30,7 @@ export const WIDGETS: WidgetDef[] = [
   ...moneyWidgets,
   ...accountWidgets,
   ...extraWidgets,
+  ...googleWidgets,
   ...weatherWidgets,
 ];
 

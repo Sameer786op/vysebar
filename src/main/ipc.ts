@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
-import { app, ipcMain, nativeImage, shell } from "electron";
+import { existsSync, type Dirent } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from "electron";
 import type { Data, Pin, Settings, Toast, WinInfo } from "@shared/types";
 import { getIcon, iconSource, importTaskbarPins, launchPin, launchWindowApp, pinFromPath, pinFromStartApp, startAppList, windowThumbs } from "./apps";
 import { host } from "./host";
@@ -9,6 +12,7 @@ import { searchCity } from "./services/online";
 import { toast } from "./services/automations";
 import { openSettings, openWidgets } from "./windows";
 import { check as checkForUpdate, installNow as installUpdate, updateState } from "./updater";
+import { log } from "./log";
 
 // the host commands a window may ask for; taskbar and appbar control stay with the main process
 const HOST_COMMANDS = new Set([
@@ -17,13 +21,15 @@ const HOST_COMMANDS = new Set([
   "setRadio", "setTheme", "setBrightness", "nextKeyboard", "emptyRecycleBin",
   "minimize", "maximize", "restore", "close",
   "keepAwake", "mic", "desktopIcons", "displayMode", "quickAccess", "trayClick", "jumpList", "jumpOpen", "jumpTask",
+  "setMic", "micDevices", "energySaver", "dnd", "camera", "hotspot",
 ]);
 
-// which topic to refresh after a host command changed what it shows
-const REFRESH: Record<string, string> = {
-  setVolume: "volume", setAudioDevice: "volume", setRadio: "radios", setTheme: "theme", setBrightness: "brightness",
-  nextKeyboard: "keyboard", emptyRecycleBin: "recycle", mediaControl: "media",
-  keepAwake: "switches", mic: "switches", desktopIcons: "switches",
+// which topics to refresh after a host command changed what they show
+const REFRESH: Record<string, string[]> = {
+  setVolume: ["volume"], setAudioDevice: ["volume", "mic"], setRadio: ["radios", "bluetooth"], setTheme: ["theme"], setBrightness: ["brightness"],
+  nextKeyboard: ["keyboard"], emptyRecycleBin: ["recycle"], mediaControl: ["media"],
+  keepAwake: ["switches"], mic: ["switches", "mic"], setMic: ["mic", "switches"], desktopIcons: ["switches"],
+  energySaver: ["switches"], dnd: ["switches"], camera: ["switches"], hotspot: ["switches"],
 };
 
 // startDrag needs a non-empty icon
@@ -60,7 +66,7 @@ export function registerIpc(): void {
   ipcMain.handle("host", async (_e, cmd: string, args: Record<string, unknown> = {}) => {
     if (!HOST_COMMANDS.has(cmd)) throw new Error(`not allowed: ${cmd}`);
     const r = await host.call(cmd, args);
-    if (REFRESH[cmd]) refreshTopic(REFRESH[cmd]);
+    for (const t of REFRESH[cmd] ?? []) refreshTopic(t);
     return r;
   });
 
@@ -100,6 +106,8 @@ export function registerIpc(): void {
   });
 
   ipcMain.handle("apps:start", () => startAppList());
+  // how to start an app from Start, for an App widget (not added to the dock's pins)
+  ipcMain.handle("apps:pinFor", (_e, a: { name: string; id: string }) => pinFromStartApp(a));
   ipcMain.handle("icon", (_e, target: { aumid?: string; path?: string; exe?: string } | string, size = 64) =>
     getIcon(typeof target === "string" ? [target] : iconSource(target), size),
   );
@@ -133,6 +141,49 @@ export function registerIpc(): void {
     e.sender.startDrag({ file: path, icon: img.isEmpty() ? nativeImage.createFromDataURL(EMPTY_PNG) : img.resize({ width: 48 }) });
   });
 
+  // a folder of your choice, for a Folder widget
+  ipcMain.handle("dialog:folder", async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const opts = { title: "Choose a folder for the dock", properties: ["openDirectory" as const] };
+    const r = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
+    const path = r.canceled ? null : r.filePaths[0];
+    return path ? { path, name: basename(path) || path } : null;
+  });
+
+  // what's in a folder, for its stack: newest first, hidden and system files left out
+  ipcMain.handle("folder:list", async (_e, path: string) => {
+    const items: { name: string; path: string; dir: boolean; mtime: number; size: number }[] = [];
+    let names: Dirent[];
+    try {
+      names = await readdir(path, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    await Promise.all(
+      names
+        .filter((d) => !d.name.startsWith(".") && !/^(desktop\.ini|thumbs\.db|\$recycle\.bin)$/i.test(d.name))
+        .slice(0, 400)
+        .map(async (d) => {
+          const p = join(path, d.name);
+          try {
+            const st = await stat(p);
+            items.push({ name: d.name, path: p, dir: st.isDirectory(), mtime: st.mtimeMs, size: st.size });
+          } catch {
+            /* gone or locked */
+          }
+        }),
+    );
+    return items.sort((a, b) => b.mtime - a.mtime);
+  });
+
+  // the text in a screenshot, read on this PC by Windows' own OCR and put on the clipboard
+  ipcMain.handle("ocr:copy", async (_e, path: string) => {
+    if (!/\.(png|jpe?g|bmp|gif|tiff?)$/i.test(path ?? "") || !existsSync(path)) throw new Error("not a picture");
+    const text = await host.call<string>("ocr", { path }, 30_000);
+    if (text) clipboard.writeText(text);
+    return text ?? "";
+  });
+
   ipcMain.handle("weather:search", (_e, q: string) => searchCity(q));
   ipcMain.handle("toast", (_e, t: Toast) => toast(t));
   ipcMain.handle("toast:test", () => toast({ title: "VyseBar", body: "Alerts will show up right here", icon: "bell" }));
@@ -143,8 +194,12 @@ export function registerIpc(): void {
   ipcMain.handle("update:get", () => updateState());
   ipcMain.handle("update:check", () => checkForUpdate());
   ipcMain.handle("update:install", () => installUpdate());
-  ipcMain.handle("app:quit", () => app.quit());
+  ipcMain.handle("app:quit", () => {
+    log("Quit chosen in VyseBar");
+    app.quit();
+  });
   ipcMain.handle("app:restart", () => {
+    log("Restart chosen in VyseBar");
     app.relaunch();
     app.quit();
   });

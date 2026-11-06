@@ -1,8 +1,10 @@
-// Sign in with Google: your name and photo in VyseBar.
+// Sign in with Google: your name and photo in VyseBar, and Gmail and Search Console widgets.
 // Google's flow for desktop apps: the browser opens Google's sign-in page, Google sends the
 // answer back to a one-time listener on 127.0.0.1, and VyseBar trades it (with PKCE) for an ID
 // token that carries your name, email and photo. Only the basic profile scopes are asked for,
 // so Google shows no "unverified app" screen and the sign-in doesn't expire after a week.
+// The Gmail and Search Console widgets ask for one more read-only scope each, only when you
+// allow it on their card (Google's incremental consent: the same sign-in, one more permission).
 // The OAuth client is your own (Settings › Accounts explains how to make one); the refresh
 // token is encrypted with Windows' data protection and only ever sent to Google.
 import { createHash, randomBytes } from "node:crypto";
@@ -13,16 +15,42 @@ import { join } from "node:path";
 import { app, ipcMain, net, safeStorage, shell } from "electron";
 import type { GoogleProfile } from "@shared/types";
 import { settings } from "../store";
-import { defineTopic, publish } from "../topics";
+import { defineTopic, poller, publish, refreshTopic } from "../topics";
+import { getJson } from "./online";
 
 const AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN = "https://oauth2.googleapis.com/token";
 const REVOKE = "https://oauth2.googleapis.com/revoke";
 const SCOPES = "openid profile email";
+/** extra read-only access, asked for one at a time */
+const EXTRA = {
+  gmail: "https://www.googleapis.com/auth/gmail.metadata",
+  searchConsole: "https://www.googleapis.com/auth/webmasters.readonly",
+} as const;
+type Extra = keyof typeof EXTRA;
+const EXTRA_NAME: Record<Extra, string> = { gmail: "Gmail", searchConsole: "Search Console" };
+const API_PAGE: Record<Extra, string> = {
+  gmail: "https://console.cloud.google.com/apis/library/gmail.googleapis.com",
+  searchConsole: "https://console.cloud.google.com/apis/library/searchconsole.googleapis.com",
+};
 
 const dir = app.getPath("userData");
 const profileFile = join(dir, "google-profile.json");
 const tokenFile = join(dir, "google-token.bin");
+const scopesFile = join(dir, "google-scopes.json");
+
+// which scopes Google has granted, as its last token answer listed them
+let granted: string[] = [];
+try {
+  if (existsSync(scopesFile)) granted = JSON.parse(readFileSync(scopesFile, "utf8")) as string[];
+} catch {
+  granted = [];
+}
+function saveScopes(scope: string | undefined): void {
+  if (!scope) return;
+  granted = scope.split(/\s+/).filter(Boolean);
+  writeFileSync(scopesFile, JSON.stringify(granted));
+}
 
 let profile: GoogleProfile | null = null;
 try {
@@ -55,7 +83,7 @@ function loadToken(): string | null {
 
 const b64url = (b: Buffer) => b.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 
-type Tokens = { id_token?: string; refresh_token?: string; access_token?: string; error?: string; error_description?: string };
+type Tokens = { id_token?: string; refresh_token?: string; access_token?: string; expires_in?: number; scope?: string; error?: string; error_description?: string };
 
 async function tokenRequest(body: Record<string, string>): Promise<Tokens> {
   const res = await net.fetch(TOKEN, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(body).toString() });
@@ -105,12 +133,12 @@ const page = (title: string, body: string) =>
 let pending: Promise<{ ok: true } | { error: string }> | null = null;
 
 /** opens Google's sign-in page in the browser and waits (up to five minutes) for the answer */
-function signIn(): Promise<{ ok: true } | { error: string }> {
-  pending ??= run().finally(() => (pending = null));
+function signIn(extra?: Extra): Promise<{ ok: true } | { error: string }> {
+  pending ??= run(extra).finally(() => (pending = null));
   return pending;
 }
 
-async function run(): Promise<{ ok: true } | { error: string }> {
+async function run(extra?: Extra): Promise<{ ok: true } | { error: string }> {
   const { clientId, clientSecret } = settings.value.google;
   if (!clientId.trim()) return { error: "Add your OAuth client ID first." };
   const verifier = b64url(randomBytes(48));
@@ -137,17 +165,21 @@ async function run(): Promise<{ ok: true } | { error: string }> {
   const timer = setTimeout(() => finish({ error: "Sign-in timed out." }), 5 * 60_000);
   try {
     const url = new URL(AUTH);
-    url.search = new URLSearchParams({
+    const params: Record<string, string> = {
       client_id: clientId.trim(),
       redirect_uri: redirect,
       response_type: "code",
-      scope: SCOPES,
+      scope: extra ? `${SCOPES} ${EXTRA[extra]}` : SCOPES,
       code_challenge: challenge,
       code_challenge_method: "S256",
       state,
       access_type: "offline",
-      prompt: "consent select_account",
-    }).toString();
+      // keeps what was granted before, so adding Gmail doesn't drop Search Console
+      include_granted_scopes: "true",
+      prompt: extra ? "consent" : "consent select_account",
+    };
+    if (extra && profile?.email) params.login_hint = profile.email;
+    url.search = new URLSearchParams(params).toString();
     await shell.openExternal(url.toString());
     const a = await answered;
     if (!a.code) return { error: a.error ?? "Google didn't sign you in." };
@@ -162,7 +194,10 @@ async function run(): Promise<{ ok: true } | { error: string }> {
     if (!t.id_token) return { error: "Google sent no profile." };
     const first = !profile;
     if (t.refresh_token) saveToken(t.refresh_token);
+    saveScopes(t.scope);
+    access = null;
     saveProfile(await profileFrom(t.id_token));
+    if (extra && !granted.includes(EXTRA[extra])) return { error: `Google didn't give ${EXTRA_NAME[extra]} access: tick its box on Google's page.` };
     // the first time, the Start tile shows your photo (Appearance › Start tile changes it back)
     if (first && settings.value.startTile === "windows" && profile?.photo) settings.set({ startTile: "google" });
     return { ok: true };
@@ -180,6 +215,9 @@ async function signOut(): Promise<void> {
   const token = loadToken();
   saveToken(null);
   saveProfile(null);
+  granted = [];
+  access = null;
+  rmSync(scopesFile, { force: true });
   if (settings.value.startTile === "google") settings.set({ startTile: "windows" });
   if (token) await net.fetch(`${REVOKE}?token=${encodeURIComponent(token)}`, { method: "POST" }).catch(() => undefined);
 }
@@ -198,10 +236,137 @@ async function refreshProfile(): Promise<void> {
   }
 }
 
+// ---------- Gmail and Search Console ----------
+
+type Need = { error: string; connect?: "signin" | "grant"; enable?: string };
+let access: { token: string; until: number } | null = null;
+let refreshing: Promise<string | Need> | null = null;
+
+/** a short-lived access token for an extra scope, or what the card should ask for */
+async function accessFor(extra: Extra): Promise<string | Need> {
+  if (!profile || !loadToken()) return { error: "Sign in with Google first", connect: "signin" };
+  if (!granted.includes(EXTRA[extra])) return { error: `Allow ${EXTRA_NAME[extra]} access`, connect: "grant" };
+  if (access && access.until > Date.now() + 60_000) return access.token;
+  refreshing ??= (async (): Promise<string | Need> => {
+    const { clientId, clientSecret } = settings.value.google;
+    try {
+      const t = await tokenRequest({ client_id: clientId.trim(), client_secret: clientSecret.trim(), refresh_token: loadToken()!, grant_type: "refresh_token" });
+      if (!t.access_token) return { error: "Google sent no access token" };
+      saveScopes(t.scope);
+      access = { token: t.access_token, until: Date.now() + (t.expires_in ?? 3600) * 1000 };
+      return access.token;
+    } catch (e) {
+      if ((e as { code?: string }).code === "invalid_grant") {
+        if (profile) saveProfile({ ...profile, valid: false });
+        return { error: "Google ended the sign-in: sign in again in Settings", connect: "signin" };
+      }
+      return { error: (e as Error).message };
+    } finally {
+      refreshing = null;
+    }
+  })();
+  const r = await refreshing;
+  // permission taken back on the Google account page
+  if (typeof r === "string" && !granted.includes(EXTRA[extra])) return { error: `Allow ${EXTRA_NAME[extra]} access`, connect: "grant" };
+  return r;
+}
+
+function googleError(e: unknown, extra: Extra): Need {
+  const msg = (e as Error).message;
+  if (/^401/.test(msg)) access = null;
+  // the API isn't switched on for the OAuth client's Cloud project
+  if (/^403/.test(msg)) return { error: `Google refused: turn on the ${EXTRA_NAME[extra]} API in your Cloud project`, enable: API_PAGE[extra] };
+  return { error: `Couldn't reach ${EXTRA_NAME[extra]}: ${msg}` };
+}
+
+const header = (m: any, name: string): string => m?.payload?.headers?.find((h: any) => String(h.name).toLowerCase() === name)?.value ?? "";
+/** "Name" <someone@example.com> -> Name */
+const sender = (from: string) => from.replace(/<[^>]*>/, "").replace(/"/g, "").trim() || from.replace(/[<>]/g, "");
+
+async function gmail() {
+  const a = await accessFor("gmail");
+  if (typeof a !== "string") return a;
+  const init = { headers: { Authorization: `Bearer ${a}` } };
+  const base = "https://gmail.googleapis.com/gmail/v1/users/me";
+  try {
+    const [inbox, list] = await Promise.all([getJson<any>(`${base}/labels/INBOX`, init), getJson<any>(`${base}/messages?labelIds=INBOX&labelIds=UNREAD&maxResults=8`, init)]);
+    const msgs = await Promise.all((list.messages ?? []).map((m: any) => getJson<any>(`${base}/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`, init).catch(() => null)));
+    return {
+      unread: Number(inbox.messagesUnread ?? 0),
+      email: profile?.email ?? "",
+      messages: msgs.filter(Boolean).map((m: any) => ({ id: m.id, thread: m.threadId, from: sender(header(m, "from")), subject: header(m, "subject") || "(no subject)", at: Number(m.internalDate) || 0 })),
+    };
+  } catch (e) {
+    return googleError(e, "gmail");
+  }
+}
+
+const localDay = (t: number) => {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+async function searchConsole() {
+  const a = await accessFor("searchConsole");
+  if (typeof a !== "string") return a;
+  const auth = { Authorization: `Bearer ${a}` };
+  try {
+    const entries: any[] = (await getJson<any>("https://www.googleapis.com/webmasters/v3/sites", { headers: auth })).siteEntry ?? [];
+    const sites = entries.filter((x) => x.permissionLevel !== "siteUnverifiedUser").map((x) => String(x.siteUrl));
+    if (!sites.length) return { error: "No verified sites in Search Console yet" };
+    const want = settings.value.google.searchSite;
+    const site = want && sites.includes(want) ? want : sites[0];
+    const ago = (n: number) => localDay(Date.now() - n * 86400_000);
+    const res = await net.fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site)}/searchAnalytics/query`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ startDate: ago(33), endDate: ago(0), dimensions: ["date"], rowLimit: 100 }),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    // Google's numbers trail by two or three days: the last 28 days it has
+    const rows: { date: string; clicks: number; impressions: number; position: number }[] = (((await res.json()) as any).rows ?? [])
+      .map((r: any) => ({ date: String(r.keys?.[0] ?? ""), clicks: Number(r.clicks ?? 0), impressions: Number(r.impressions ?? 0), position: Number(r.position ?? 0) }))
+      .sort((x: { date: string }, y: { date: string }) => x.date.localeCompare(y.date))
+      .slice(-28);
+    const sum = (k: "clicks" | "impressions", list = rows) => list.reduce((s, r) => s + r[k], 0);
+    const clicks = sum("clicks");
+    const impressions = sum("impressions");
+    const position = impressions ? rows.reduce((s, r) => s + r.position * r.impressions, 0) / impressions : 0;
+    const week = sum("clicks", rows.slice(-7));
+    const prev = sum("clicks", rows.slice(-14, -7));
+    return { sites, site, clicks, impressions, ctr: impressions ? (clicks / impressions) * 100 : 0, position, days: rows, change: prev ? ((week - prev) / prev) * 100 : null, through: rows[rows.length - 1]?.date ?? null };
+  } catch (e) {
+    return googleError(e, "searchConsole");
+  }
+}
+
 export function initGoogle(): void {
   defineTopic("profile", { start: (pub) => pub(profile) });
-  ipcMain.handle("google:signIn", () => signIn());
-  ipcMain.handle("google:signOut", () => signOut());
+  defineTopic("gmail", poller(gmail, 3 * 60_000));
+  defineTopic("searchConsole", poller(searchConsole, 60 * 60_000));
+  const refreshExtras = () => {
+    refreshTopic("gmail");
+    refreshTopic("searchConsole");
+  };
+  ipcMain.handle("google:signIn", async () => {
+    const r = await signIn();
+    refreshExtras();
+    return r;
+  });
+  ipcMain.handle("google:grant", async (_e, extra: string) => {
+    if (!(extra in EXTRA)) return { error: "Unknown permission" };
+    if (!profile) return { error: "Sign in with Google in Settings first" };
+    const r = await signIn(extra as Extra);
+    refreshExtras();
+    return r;
+  });
+  ipcMain.handle("google:signOut", async () => {
+    await signOut();
+    refreshExtras();
+  });
+  settings.onChange((v, prev) => {
+    if (v.google.searchSite !== prev.google.searchSite) refreshTopic("searchConsole");
+  });
   let last = 0;
   const daily = () => {
     if (Date.now() - last < 23 * 3600_000) return;

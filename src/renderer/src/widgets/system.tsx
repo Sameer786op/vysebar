@@ -1,14 +1,16 @@
 // What the PC is doing: load, memory, network, battery, drives, and the switches you reach for.
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { motion } from "motion/react";
 import {
-  ArrowDown, ArrowUp, BatteryCharging, Bell, Bluetooth, Coffee, Cpu, HardDrive, LayoutGrid, MemoryStick, Mic, MicOff, MonitorSmartphone, Moon, Plane,
-  Settings2, SlidersHorizontal, Sun, SunMedium, Trash2, Volume2, VolumeX, Wifi, WifiOff,
+  ArrowDown, ArrowUp, BatteryCharging, Bell, BellOff, Bluetooth, BluetoothOff, Camera, CameraOff, Check, Coffee, Cpu, Gamepad2, HardDrive, Headphones, Keyboard, Laptop,
+  LayoutGrid, Leaf, MemoryStick, Mic, MicOff, MonitorSmartphone, Moon, Mouse, Pencil, Plane, RadioTower, Settings2, SlidersHorizontal, Smartphone, Speaker, Sun, SunMedium,
+  Trash2, Volume2, VolumeX, Watch, Wifi, WifiOff,
 } from "lucide-react";
+import type { WidgetInstance } from "@shared/types";
 import { bytes, duration, speed } from "../lib/format";
-import { host, refreshTopic, useBattery, useNow, useStore, useTopic } from "../lib/state";
-import { Bar, CardHeader, Empty, Ring, Slider, Sparkline } from "../components/ui";
-import type { CardProps, MenuItem, WidgetDef } from "./types";
+import { host, refreshTopic, setSettings, setWidgetConfig, useBattery, useNow, useStore, useTopic } from "../lib/state";
+import { Bar, CardHeader, Empty, Ring, Slider, Sparkline, Toggle } from "../components/ui";
+import type { CardProps, MenuItem, TileProps, WidgetDef } from "./types";
 
 const stop = (e: React.MouseEvent) => e.stopPropagation();
 
@@ -252,45 +254,124 @@ function ToggleDot({ on, onClick, children, title, color = "var(--accent)" }: { 
   );
 }
 
-function QuickTogglesTile() {
+interface Switches {
+  keepAwake: boolean;
+  mic: boolean | null;
+  desktopIcons: boolean | null;
+  energy: { on: boolean; available: boolean; always: boolean } | null;
+  dnd: boolean | null;
+  camera: boolean | null;
+  hotspot: { on: boolean; clients: number; name?: string } | null;
+  ethernet: boolean | null;
+}
+
+interface ToggleDef {
+  id: string;
+  label: string;
+  on: boolean;
+  /** this PC doesn't have it */
+  missing?: boolean;
+  sub: string;
+  icon: (size: number) => React.ReactNode;
+  color?: string;
+  toggle: () => void;
+}
+
+const quiet = (p: Promise<unknown>) => void p.catch(() => undefined);
+
+/** every switch Quick Toggles knows, in the order the card shows them */
+function useToggleList(): ToggleDef[] {
   const t = useToggles();
+  const sw = useTopic<Switches>("switches");
+  const energyOn = !!sw?.energy && (sw.energy.on || sw.energy.always);
+  return [
+    { id: "wifi", label: "Wi-Fi", on: !!t.wifi?.on, missing: !t.wifi, sub: t.wifi ? (t.wifi.on ? "On" : "Off") : "No adapter", icon: (n) => (t.wifi?.on === false ? <WifiOff size={n} /> : <Wifi size={n} />), toggle: () => t.wifi && t.setRadio("wifi", !t.wifi.on) },
+    { id: "bluetooth", label: "Bluetooth", on: !!t.bt?.on, missing: !t.bt, sub: t.bt ? (t.bt.on ? "On" : "Off") : "No adapter", icon: (n) => <Bluetooth size={n} />, toggle: () => t.bt && t.setRadio("bluetooth", !t.bt.on) },
+    { id: "airplane", label: "Airplane", on: t.airplane, sub: t.airplane ? "On" : "Off", icon: (n) => <Plane size={n} />, color: "#ff9f0a", toggle: () => void t.setAirplane(!t.airplane) },
+    { id: "dark", label: "Dark mode", on: t.dark, sub: t.dark ? "On" : "Off", icon: (n) => <Moon size={n} />, color: "#5e5ce6", toggle: () => t.setDark(!t.dark) },
+    { id: "mute", label: "Mute", on: !!t.vol?.muted, sub: t.vol?.muted ? "Sound off" : "Sound on", icon: (n) => (t.vol?.muted ? <VolumeX size={n} /> : <Volume2 size={n} />), color: "#ff453a", toggle: t.mute },
+    { id: "mic", label: "Microphone", on: sw?.mic === true, missing: sw?.mic == null, sub: sw?.mic == null ? "None found" : sw.mic ? "On" : "Muted", icon: (n) => (sw?.mic === false ? <MicOff size={n} /> : <Mic size={n} />), color: "#30d158", toggle: () => quiet(host("mic", { mute: !!sw?.mic })) },
+    { id: "dnd", label: "Do not disturb", on: sw?.dnd === true, missing: sw?.dnd == null, sub: sw?.dnd ? "Notifications held" : "Off", icon: (n) => (sw?.dnd ? <BellOff size={n} /> : <Bell size={n} />), color: "#5e5ce6", toggle: () => quiet(host("dnd", { on: !sw?.dnd })) },
+    { id: "energy", label: "Energy saver", on: energyOn, missing: !sw?.energy, sub: sw?.energy?.on ? "On" : sw?.energy?.always ? "On battery" : "Off", icon: (n) => <Leaf size={n} />, color: "#30d158", toggle: () => quiet(host("energySaver", { on: !energyOn })) },
+    { id: "keepAwake", label: "Keep awake", on: !!sw?.keepAwake, sub: sw?.keepAwake ? "No sleep" : "Off", icon: (n) => <Coffee size={n} />, color: "#ff9f0a", toggle: () => quiet(host("keepAwake", { on: !sw?.keepAwake })) },
+    { id: "hotspot", label: "Hotspot", on: !!sw?.hotspot?.on, missing: !sw?.hotspot, sub: sw?.hotspot ? (sw.hotspot.on ? `${sw.hotspot.clients} connected` : "Off") : "Not available", icon: (n) => <RadioTower size={n} />, color: "#ff9f0a", toggle: () => quiet(host("hotspot", { on: !sw?.hotspot?.on })) },
+    // a cable can't be switched from here without admin rights; this one shows it and opens its settings
+    { id: "ethernet", label: "Ethernet", on: sw?.ethernet === true, missing: sw?.ethernet == null, sub: sw?.ethernet == null ? "No adapter" : sw.ethernet ? "Connected" : "Unplugged", icon: (n) => <EthernetIcon size={n} />, toggle: () => void window.vyse.invoke("open:url", "ms-settings:network-ethernet") },
+    { id: "camera", label: "Camera", on: sw?.camera === true, missing: sw?.camera == null, sub: sw?.camera == null ? "None found" : sw.camera ? "Apps can use it" : "Blocked", icon: (n) => (sw?.camera === false ? <CameraOff size={n} /> : <Camera size={n} />), color: "#64d2ff", toggle: () => quiet(host("camera", { on: !sw?.camera })) },
+    { id: "desktopIcons", label: "Desktop icons", on: sw?.desktopIcons === true, missing: sw?.desktopIcons == null, sub: sw?.desktopIcons ? "Showing" : "Hidden", icon: (n) => <LayoutGrid size={n} />, color: "#64d2ff", toggle: () => quiet(host("desktopIcons", { show: !sw?.desktopIcons })) },
+  ];
+}
+
+const TOGGLE_NAMES: [string, string][] = [
+  ["wifi", "Wi-Fi"], ["bluetooth", "Bluetooth"], ["airplane", "Airplane"], ["dark", "Dark mode"], ["mute", "Mute"], ["mic", "Microphone"], ["dnd", "Do not disturb"],
+  ["energy", "Energy saver"], ["keepAwake", "Keep awake"], ["hotspot", "Mobile hotspot"], ["ethernet", "Ethernet"], ["camera", "Camera"], ["desktopIcons", "Desktop icons"],
+];
+
+function toggleOnTile(id: string) {
+  const cur = useStore.getState().settings.quickToggles;
+  const next = cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id];
+  // kept in the card's order, whatever order they were picked in
+  setSettings({ quickToggles: TOGGLE_NAMES.map(([k]) => k).filter((k) => next.includes(k)) });
+}
+
+function QuickTogglesTile() {
+  const list = useToggleList();
+  const ids = useStore((st) => st.settings.quickToggles);
+  const shown = list.filter((t) => ids.includes(t.id));
+  if (!shown.length) return <div className="flex h-full items-center gap-1.5 px-3 text-[11.5px]" style={{ color: "var(--fg2)" }}><SlidersHorizontal size={14} /> Toggles</div>;
   return (
     <div className="flex h-full items-center gap-1.5 px-2">
-      <ToggleDot title="Wi-Fi" on={!!t.wifi?.on} onClick={() => t.wifi && t.setRadio("wifi", !t.wifi.on)}>{t.wifi?.on ? <Wifi size={14} /> : <WifiOff size={14} />}</ToggleDot>
-      <ToggleDot title="Bluetooth" on={!!t.bt?.on} onClick={() => t.bt && t.setRadio("bluetooth", !t.bt.on)}><Bluetooth size={14} /></ToggleDot>
-      <ToggleDot title="Dark mode" on={t.dark} onClick={() => t.setDark(!t.dark)}><Moon size={14} /></ToggleDot>
-      <ToggleDot title={t.vol?.muted ? "Unmute" : "Mute"} on={!!t.vol?.muted} onClick={t.mute} color="#ff453a">{t.vol?.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}</ToggleDot>
+      {shown.map((t) => (
+        <ToggleDot key={t.id} title={`${t.label}: ${t.sub}`} on={t.on && !t.missing} onClick={() => !t.missing && t.toggle()} color={t.color}>{t.icon(14)}</ToggleDot>
+      ))}
     </div>
   );
 }
 
-function BigToggle({ on, onClick, icon, label, sub, color = "var(--accent)", disabled }: { on: boolean; onClick: () => void; icon: React.ReactNode; label: string; sub: string; color?: string; disabled?: boolean }) {
+function quickTogglesMenu(): MenuItem[] {
+  const ids = useStore.getState().settings.quickToggles;
+  return [{ label: "On the tile", disabled: true }, ...TOGGLE_NAMES.map(([id, label]) => ({ label, checked: ids.includes(id), onClick: () => toggleOnTile(id) }))];
+}
+
+function BigToggle({ on, onClick, icon, label, sub, color = "var(--accent)", disabled, picked }: { on: boolean; onClick: () => void; icon: React.ReactNode; label: string; sub: string; color?: string; disabled?: boolean; picked?: boolean }) {
   return (
-    <button disabled={disabled} onClick={onClick} className="flex items-center gap-2.5 rounded-[14px] p-2.5 text-left transition-colors disabled:opacity-40" style={{ background: "var(--chip)" }}>
+    <button disabled={disabled} onClick={onClick} className="relative flex items-center gap-2.5 rounded-[14px] p-2.5 text-left transition-colors disabled:opacity-40" style={{ background: "var(--chip)", outline: picked ? "1.5px solid var(--accent)" : undefined }}>
       <span className="grid h-[32px] w-[32px] shrink-0 place-items-center rounded-full transition-colors" style={{ background: on ? color : "var(--track)", color: on ? "white" : "var(--fg)" }}>{icon}</span>
       <span className="min-w-0 leading-tight">
         <span className="block truncate text-[12.5px] font-semibold">{label}</span>
         <span className="block truncate text-[10.5px]" style={{ color: "var(--fg2)" }}>{sub}</span>
       </span>
+      {picked !== undefined && (
+        <span className="absolute right-2 top-2 grid h-[16px] w-[16px] place-items-center rounded-full" style={{ background: picked ? "var(--accent)" : "var(--track)", color: "white" }}>{picked && <Check size={10} strokeWidth={3} />}</span>
+      )}
     </button>
   );
 }
 
 function QuickTogglesCard(_: CardProps) {
   const t = useToggles();
+  const list = useToggleList();
+  const ids = useStore((st) => st.settings.quickToggles);
+  const [editing, setEditing] = useState(false);
   const bright = useTopic<number | null>("brightness");
-  const sw = useTopic<{ keepAwake: boolean; mic: boolean | null; desktopIcons: boolean | null }>("switches");
   return (
     <div>
+      {editing && <div className="mb-2 text-[11.5px]" style={{ color: "var(--fg2)" }}>Pick the switches that sit on the dock tile.</div>}
       <div className="grid grid-cols-2 gap-2">
-        <BigToggle on={!!t.wifi?.on} disabled={!t.wifi} onClick={() => t.wifi && t.setRadio("wifi", !t.wifi.on)} icon={<Wifi size={15} />} label="Wi-Fi" sub={t.wifi ? (t.wifi.on ? "On" : "Off") : "No adapter"} />
-        <BigToggle on={!!t.bt?.on} disabled={!t.bt} onClick={() => t.bt && t.setRadio("bluetooth", !t.bt.on)} icon={<Bluetooth size={15} />} label="Bluetooth" sub={t.bt ? (t.bt.on ? "On" : "Off") : "No adapter"} />
-        <BigToggle on={t.airplane} onClick={() => t.setAirplane(!t.airplane)} icon={<Plane size={15} />} label="Airplane" sub={t.airplane ? "On" : "Off"} color="#ff9f0a" />
-        <BigToggle on={t.dark} onClick={() => t.setDark(!t.dark)} icon={<Moon size={15} />} label="Dark Mode" sub={t.dark ? "On" : "Off"} color="#5e5ce6" />
-        <BigToggle on={!!sw?.keepAwake} onClick={() => void host("keepAwake", { on: !sw?.keepAwake })} icon={<Coffee size={15} />} label="Keep Awake" sub={sw?.keepAwake ? "No sleep" : "Off"} color="#ff9f0a" />
-        <BigToggle on={sw?.mic === true} disabled={sw?.mic == null} onClick={() => void host("mic", { mute: !!sw?.mic })} icon={sw?.mic === false ? <MicOff size={15} /> : <Mic size={15} />} label="Microphone" sub={sw?.mic == null ? "None found" : sw.mic ? "On" : "Muted"} color="#30d158" />
-        <BigToggle on={sw?.desktopIcons === true} disabled={sw?.desktopIcons == null} onClick={() => void host("desktopIcons", { show: !sw?.desktopIcons })} icon={<LayoutGrid size={15} />} label="Icons" sub={sw?.desktopIcons ? "On desktop" : "Hidden"} color="#64d2ff" />
-        <BigToggle on={false} onClick={() => void host("displayMode")} icon={<MonitorSmartphone size={15} />} label="Project" sub="Display mode" />
+        {list.map((x) => (
+          <BigToggle
+            key={x.id}
+            on={x.on && !x.missing}
+            disabled={!editing && x.missing}
+            onClick={() => (editing ? toggleOnTile(x.id) : x.toggle())}
+            icon={x.icon(15)}
+            label={x.label}
+            sub={x.sub}
+            color={x.color}
+            picked={editing ? ids.includes(x.id) : undefined}
+          />
+        ))}
+        {!editing && <BigToggle on={false} onClick={() => void host("displayMode")} icon={<MonitorSmartphone size={15} />} label="Project" sub="Display mode" />}
       </div>
       <div className="mt-3 space-y-2 rounded-[14px] p-3" style={{ background: "var(--chip)" }}>
         <div className="text-[11.5px] font-semibold" style={{ color: "var(--fg2)" }}>Sound · {t.vol?.device ?? "..."}</div>
@@ -302,8 +383,8 @@ function QuickTogglesCard(_: CardProps) {
           </>
         )}
       </div>
-      <div className="mt-3 grid grid-cols-3 gap-2">
-        {([["Quick Settings", <SlidersHorizontal key="q" size={15} />, () => host("quickSettings")], ["Notifications", <Bell key="n" size={15} />, () => host("actionCenter")], ["Settings", <Settings2 key="s" size={15} />, () => window.vyse.invoke("run", "settings")]] as const).map(([label, icon, fn]) => (
+      <div className="mt-3 grid grid-cols-4 gap-2">
+        {([["Edit tile", editing ? <Check key="e" size={15} /> : <Pencil key="e" size={15} />, async () => setEditing((e) => !e)], ["Quick Settings", <SlidersHorizontal key="q" size={15} />, () => host("quickSettings")], ["Notifications", <Bell key="n" size={15} />, () => host("actionCenter")], ["Settings", <Settings2 key="s" size={15} />, () => window.vyse.invoke("run", "settings")]] as const).map(([label, icon, fn]) => (
           <button key={label} onClick={() => void fn()} className="flex flex-col items-center gap-1 rounded-[12px] py-2 text-[10.5px] font-medium" style={{ background: "var(--chip)" }}>
             {icon}
             {label}
@@ -431,9 +512,10 @@ function ProgressCard(_: CardProps) {
 
 // ---------- storage / trash ----------
 
-function StorageTile() {
+function StorageTile({ inst }: TileProps) {
   const st = useTopic<{ drives: Drive[] }>("storage");
-  const c = st?.drives.find((d) => d.letter === "C") ?? st?.drives[0];
+  const want = (inst.config?.drive as string | undefined) ?? "C";
+  const c = st?.drives.find((d) => d.letter === want) ?? st?.drives.find((d) => d.letter === "C") ?? st?.drives[0];
   const used = c ? 1 - c.free / c.total : 0;
   return (
     <div className="flex h-full items-center gap-2.5 px-3">
@@ -452,6 +534,141 @@ function StorageCard(_: CardProps) {
     <div>
       <CardHeader title="Storage" right={<button onClick={() => window.vyse.invoke("open:url", "ms-settings:storagesense")} className="rounded-full px-2.5 py-1 text-[11.5px] font-semibold" style={{ background: "var(--chip)" }}>Clean up</button>} />
       <div className="space-y-3">{st?.drives.map((d) => <DriveRow key={d.letter} d={d} />) ?? <Empty>Reading drives...</Empty>}</div>
+    </div>
+  );
+}
+
+function storageMenu(inst: WidgetInstance): MenuItem[] {
+  const drives = (useStore.getState().topics.storage as { drives: Drive[] } | undefined)?.drives ?? [];
+  const want = (inst.config?.drive as string | undefined) ?? "C";
+  return [{ label: "Drive on the tile", disabled: true }, ...drives.map((d) => ({ label: `${d.letter}:  ${bytes(d.free, 0)} free`, checked: d.letter === want, onClick: () => setWidgetConfig(inst.uid, { drive: d.letter }) }))];
+}
+
+// ---------- microphone ----------
+
+interface MicInfo { volume: number; muted: boolean; device: string | null; id: string }
+let micDevices: { id: string; name: string }[] = [];
+const loadMicDevices = () => host<{ id: string; name: string }[]>("micDevices").then((l) => (micDevices = l ?? [])).catch(() => undefined);
+
+function MicTile() {
+  const m = useTopic<MicInfo | null>("mic");
+  useEffect(() => void loadMicDevices(), [m?.id]);
+  const live = !!m && !m.muted;
+  return (
+    <div className="flex h-full items-center gap-2.5 px-3">
+      <div className="grid h-[30px] w-[30px] place-items-center rounded-full transition-colors" style={{ background: !m ? "var(--chip)" : live ? "#30d158" : "#ff453a", color: m ? "white" : "var(--fg2)" }}>
+        {live || !m ? <Mic size={15} /> : <MicOff size={15} />}
+      </div>
+      <div className="flex flex-col leading-none">
+        <span className="text-[12.5px] font-semibold">{!m ? "No mic" : live ? "Mic on" : "Muted"}</span>
+        <span className="mt-1 max-w-[110px] truncate text-[10px]" style={{ color: "var(--fg2)" }}>{m ? `${m.volume}% · ${m.device ?? "Microphone"}` : "Plug one in"}</span>
+      </div>
+    </div>
+  );
+}
+
+function micMenu(): MenuItem[] {
+  const m = useStore.getState().topics.mic as MicInfo | null | undefined;
+  const items: MenuItem[] = [];
+  if (m) {
+    items.push({ label: m.muted ? "Unmute" : "Mute", icon: m.muted ? <Mic size={14} /> : <MicOff size={14} />, onClick: () => quiet(host("setMic", { muted: !m.muted })) });
+    items.push({ label: "Level", disabled: true });
+    for (const v of [25, 50, 75, 100]) items.push({ label: `${v}%`, checked: Math.abs(m.volume - v) < 3, onClick: () => quiet(host("setMic", { volume: v })) });
+  }
+  if (micDevices.length > 1) {
+    items.push({ separator: true }, { label: "Input", disabled: true });
+    for (const d of micDevices) items.push({ label: d.name, checked: d.id === m?.id, onClick: () => quiet(host("setAudioDevice", { id: d.id })) });
+  }
+  items.push({ separator: true }, { label: "Sound settings", icon: <Settings2 size={14} />, onClick: () => void window.vyse.invoke("open:url", "ms-settings:sound") });
+  return items;
+}
+
+// ---------- Bluetooth ----------
+
+interface BtDevice { id: string; name: string; connected: boolean; battery: number | null; kind: string; le: boolean }
+
+function BtIcon({ kind, size = 15 }: { kind: string; size?: number }) {
+  switch (kind) {
+    case "headset": return <Headphones size={size} />;
+    case "speaker": return <Speaker size={size} />;
+    case "phone": return <Smartphone size={size} />;
+    case "keyboard": return <Keyboard size={size} />;
+    case "mouse": return <Mouse size={size} />;
+    case "gamepad": return <Gamepad2 size={size} />;
+    case "watch": return <Watch size={size} />;
+    case "computer": return <Laptop size={size} />;
+    default: return <Bluetooth size={size} />;
+  }
+}
+
+const batteryColor = (b: number) => (b <= 15 ? "#ff453a" : b <= 30 ? "#ff9f0a" : "#30d158");
+
+function BluetoothTile() {
+  const radios = useTopic<Radio[]>("radios");
+  const list = useTopic<BtDevice[]>("bluetooth") ?? [];
+  const radio = radios?.find((r) => r.kind === "bluetooth");
+  const on = !!radio?.on;
+  const connected = list.filter((d) => d.connected);
+  // the connected device with a battery, lowest first: the one you'd want to charge
+  const low = connected.filter((d) => d.battery != null).sort((a, b) => a.battery! - b.battery!)[0];
+  return (
+    <div className="flex h-full items-center gap-2.5 px-3">
+      <div className="grid h-[30px] w-[30px] place-items-center rounded-full" style={{ background: on ? "var(--accent)" : "var(--chip)", color: on ? "white" : "var(--fg2)" }}>
+        {on ? (low ? <BtIcon kind={low.kind} size={14} /> : <Bluetooth size={15} />) : <BluetoothOff size={15} />}
+      </div>
+      <div className="flex flex-col leading-none">
+        <span className="max-w-[120px] truncate text-[12.5px] font-semibold">{!radio ? "Bluetooth" : !on ? "Off" : low ? low.name : connected.length ? connected[0].name : "On"}</span>
+        <span className="tabular mt-1 text-[10px]" style={{ color: low ? batteryColor(low.battery!) : "var(--fg2)" }}>
+          {!radio ? "No adapter" : !on ? "Bluetooth" : low ? `${low.battery}% battery` : connected.length ? `${connected.length} connected` : "Nothing connected"}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function BluetoothCard(_: CardProps) {
+  const radios = useTopic<Radio[]>("radios");
+  const list = useTopic<BtDevice[]>("bluetooth");
+  const radio = radios?.find((r) => r.kind === "bluetooth");
+  const on = !!radio?.on;
+  return (
+    <div>
+      <CardHeader
+        title="Bluetooth"
+        sub={!radio ? "No Bluetooth adapter" : on ? `${list?.filter((d) => d.connected).length ?? 0} connected` : "Off"}
+        right={
+          <div className="flex items-center gap-2">
+            <button onClick={() => void window.vyse.invoke("open:url", "ms-settings:bluetooth")} className="rounded-full px-2.5 py-1 text-[11.5px] font-semibold" style={{ background: "var(--chip)" }}>Devices</button>
+            {radio && <Toggle on={on} onChange={(v) => quiet(host("setRadio", { kind: "bluetooth", on: v }))} />}
+          </div>
+        }
+      />
+      {!list ? (
+        <Empty>Looking for devices...</Empty>
+      ) : !list.length ? (
+        <Empty>No paired devices. Pair one in Windows' Bluetooth settings.</Empty>
+      ) : (
+        <div className="space-y-1.5">
+          {list.map((d) => (
+            <button key={d.id} onClick={() => void window.vyse.invoke("open:url", "ms-settings:bluetooth")} className="flex w-full items-center gap-2.5 rounded-[12px] p-2 text-left" style={{ background: "var(--chip)", opacity: on ? 1 : 0.55 }}>
+              <span className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-full" style={{ background: d.connected && on ? "var(--accent)" : "var(--track)", color: d.connected && on ? "white" : "var(--fg)" }}>
+                <BtIcon kind={d.kind} size={14} />
+              </span>
+              <span className="min-w-0 flex-1 leading-tight">
+                <span className="block truncate text-[12.5px] font-semibold">{d.name}</span>
+                <span className="block text-[10.5px]" style={{ color: "var(--fg2)" }}>{d.connected && on ? "Connected" : "Paired"}</span>
+              </span>
+              {d.battery != null && (
+                <span className="flex w-[70px] shrink-0 flex-col items-end gap-1">
+                  <span className="tabular text-[11.5px] font-semibold" style={{ color: batteryColor(d.battery) }}>{d.battery}%</span>
+                  <Bar value={d.battery / 100} color={batteryColor(d.battery)} height={4} className="w-full" />
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="mt-2 text-[10.5px]" style={{ color: "var(--fg3)" }}>Battery levels are the ones Windows reads from each device; not every device reports one.</div>
     </div>
   );
 }
@@ -512,7 +729,16 @@ export const systemWidgets: WidgetDef[] = [
   { type: "ram", name: "Memory", category: "System", description: "How much RAM is in use.", Tile: RamTile, Card: SystemCard, cardWidth: 380 },
   { type: "network", name: "Network", category: "System", description: "Download and upload speed, live.", Tile: NetworkTile, Card: SystemCard, cardWidth: 380 },
   { type: "battery", name: "Battery", category: "System", description: "Charge, charging state and time left.", Tile: BatteryTile, Card: BatteryCard, cardWidth: 320 },
-  { type: "quickToggles", name: "Quick Toggles", category: "System", description: "Wi-Fi, Bluetooth, dark mode and mute in one click; the card adds sound and brightness.", Tile: QuickTogglesTile, Card: QuickTogglesCard, cardWidth: 320 },
+  { type: "quickToggles", name: "Quick Toggles", category: "System", description: "The switches you pick (Wi-Fi, Bluetooth, Do not disturb, energy saver, hotspot...) in one click; the card has them all plus sound and brightness.", Tile: QuickTogglesTile, Card: QuickTogglesCard, cardWidth: 340, menu: quickTogglesMenu },
+  {
+    type: "microphone", name: "Microphone", category: "System", description: "Your mic's state at a glance; click to mute or unmute, right-click for its level and input.", Tile: MicTile,
+    action: () => {
+      const m = useStore.getState().topics.mic as MicInfo | null | undefined;
+      if (m) quiet(host("setMic", { muted: !m.muted }));
+    },
+    menu: micMenu,
+  },
+  { type: "bluetooth", name: "Bluetooth", category: "System", description: "Paired devices and the battery left in each; the radio's switch is in the card.", Tile: BluetoothTile, Card: BluetoothCard, cardWidth: 340 },
   { type: "brightness", name: "Brightness", category: "System", description: "A display brightness slider right on the bar.", Tile: BrightnessTile },
   {
     type: "themeToggle", name: "Light / Dark", category: "System", description: "Switch Windows between light and dark mode.", Tile: ThemeToggleTile,
@@ -529,7 +755,7 @@ export const systemWidgets: WidgetDef[] = [
   { type: "dayProgress", name: "Day Progress", category: "System", description: "How much of today has gone.", Tile: progressTile("day", "#ff9f0a"), Card: ProgressCard, cardWidth: 340 },
   { type: "monthProgress", name: "Month Progress", category: "System", description: "How far through the month you are.", Tile: progressTile("month", "#30d158"), Card: ProgressCard, cardWidth: 340 },
   { type: "yearProgress", name: "Year Progress", category: "System", description: "This year so far, to the decimal.", Tile: progressTile("year", "#0a84ff"), Card: ProgressCard, cardWidth: 340 },
-  { type: "storage", name: "Storage", category: "System", description: "Free space on your main drive; the card lists every drive.", Tile: StorageTile, Card: StorageCard, cardWidth: 340 },
+  { type: "storage", name: "Storage", category: "System", description: "Free space on the drive you pick (right-click the tile); the card lists every drive.", Tile: StorageTile, Card: StorageCard, cardWidth: 340, menu: storageMenu },
   {
     type: "trash", name: "Recycle Bin", category: "System", description: "Drop files on it to delete them; click to open, right-click to empty.", Tile: TrashTile,
     action: () => void window.vyse.invoke("run", "recycle"),

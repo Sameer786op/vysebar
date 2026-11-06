@@ -67,6 +67,8 @@ namespace VyseHost
                 case "temperature": return Extras.Temperature();
                 case "location": return await Location.Get();
                 case "winKeys": Hotkeys.Enable(Program.Bool(a, "on", false)); return true;
+                case "keys": Hotkeys.Configure(Program.Bool(a, "win", false), Program.Bool(a, "altT", false)); return true;
+                case "navEnd": Hotkeys.EndNav(); return true;
                 case "peek":
                     {
                         if (!Program.Bool(a, "on", false)) { Peek.End(); return true; }
@@ -83,6 +85,16 @@ namespace VyseHost
                         return Program.OnUiSync(delegate { return Extras.KeepAwake(on); });
                     }
                 case "mic": return Extras.Mic(a.ContainsKey("mute") ? a["mute"] : null);
+                case "micState": return Audio.Mic();
+                case "setMic": return Audio.SetMic(Program.Num(a, "volume", -1), a.ContainsKey("muted") ? a["muted"] : null);
+                case "micDevices": return Audio.Devices(1);
+                case "energySaver": return Devices.EnergySaver(a.ContainsKey("on") ? a["on"] : null);
+                case "dnd": return Devices.DoNotDisturb(a.ContainsKey("on") ? a["on"] : null);
+                case "camera": return await Devices.Camera(a.ContainsKey("on") ? a["on"] : null);
+                case "hotspot": return await Devices.Hotspot(a.ContainsKey("on") ? a["on"] : null);
+                case "ethernet": return Devices.Ethernet();
+                case "bluetooth": return await Devices.Bluetooth();
+                case "ocr": return await Ocr.Read(Program.Str(a, "path"));
                 case "desktopIcons":
                     {
                         object show = a.ContainsKey("show") ? a["show"] : null;

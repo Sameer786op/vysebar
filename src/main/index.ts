@@ -14,8 +14,12 @@ import { openSettings } from "./windows";
 import { applyEngineFlags, initMemoryTrim } from "./perf";
 import { allDocks, initDocks } from "./docks";
 import { initUpdates } from "./updater";
+import { initLog, log } from "./log";
+
+initLog();
 
 if (!app.requestSingleInstanceLock()) {
+  log("another VyseBar is already running: this one steps aside");
   app.quit();
 } else {
   app.setAppUserModelId("app.vysebar");
@@ -32,7 +36,10 @@ if (!app.requestSingleInstanceLock()) {
   // anything still waiting the moment Windows asks, before it ends the process
   app.on("browser-window-created", (_e, win) => {
     win.on("query-session-end", () => flushAll());
-    win.on("session-end", () => flushAll());
+    win.on("session-end", () => {
+      log("Windows is signing out or shutting down");
+      flushAll();
+    });
   });
   app.on("will-quit", () => flushAll());
 
@@ -66,6 +73,7 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     initDocks();
+    log(`ready: ${allDocks().length} dock${allDocks().length === 1 ? "" : "s"}`);
     initMemoryTrim(allDocks);
     applyLoginItem();
     initUpdates();

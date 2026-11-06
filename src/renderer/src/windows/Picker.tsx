@@ -2,9 +2,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Check, KeyRound, Plus, Search } from "lucide-react";
-import type { WidgetInstance } from "@shared/types";
+import type { Pin, WidgetInstance } from "@shared/types";
 import { providerById } from "@shared/accounts";
-import { setSettings, uid, useSettings } from "../lib/state";
+import { setSettings, uid, useSettings, useStore } from "../lib/state";
+import { useIcon } from "../widgets/shortcuts";
 import { CATEGORIES, DockContext, type Category, type DockApi, type WidgetDef } from "../widgets/types";
 import { WIDGETS } from "../widgets/registry";
 import { lookOf } from "../dock/Dock";
@@ -73,7 +74,7 @@ export function TilePreview({ def, wallpaper, height = 104 }: { def: WidgetDef; 
 
 export function Picker() {
   const s = useSettings();
-  const [cat, setCat] = useState<Category | "All">("All");
+  const [cat, setCat] = useState<Category | "All" | typeof APPS>("All");
   const [q, setQ] = useState("");
   const wallpaper = useWallpaper();
   useEffect(() => {
@@ -82,14 +83,22 @@ export function Picker() {
   }, []);
 
   const inDock = (type: string) => s.widgets.filter((w) => w.type === type);
-  const toggle = (def: WidgetDef) => {
+  const toggle = async (def: WidgetDef) => {
+    // one that asks for its options (a folder) is added again each time, as a new tile
+    if (def.create) {
+      const config = await def.create();
+      if (config) setSettings({ widgets: [...useStore.getState().settings.widgets, { uid: uid(), type: def.type, config }] });
+      return;
+    }
     const have = inDock(def.type);
     if (have.length) setSettings({ widgets: s.widgets.filter((w) => w.type !== def.type) });
     else setSettings({ widgets: [...s.widgets, { uid: uid(), type: def.type }] });
   };
 
-  const list = WIDGETS.filter((w) => (cat === "All" || w.category === cat) && (!q.trim() || `${w.name} ${w.description} ${w.category}`.toLowerCase().includes(q.trim().toLowerCase())));
-  const counts = new Map(CATEGORIES.map((c) => [c, WIDGETS.filter((w) => w.category === c).length]));
+  const shown = WIDGETS.filter((w) => !w.hidden);
+  const list = shown.filter((w) => (cat === "All" || w.category === cat) && (!q.trim() || `${w.name} ${w.description} ${w.category}`.toLowerCase().includes(q.trim().toLowerCase())));
+  const counts = new Map(CATEGORIES.map((c) => [c, shown.filter((w) => w.category === c).length]));
+  const apps = useStartApps();
 
   return (
     <div className="flex h-full" style={{ color: "var(--fg)", background: "rgb(24 24 28 / 0.55)" }}>
@@ -103,15 +112,15 @@ export function Picker() {
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search" className="min-w-0 flex-1 bg-transparent text-[13px] outline-none placeholder:text-[var(--fg3)]" />
         </div>
         <nav className="thin-scroll mt-3 flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
-          {(["All", ...CATEGORIES] as const).map((c) => (
+          {(["All", ...CATEGORIES, APPS] as const).map((c) => (
             <button
               key={c}
               onClick={() => setCat(c)}
               className="flex w-full items-center justify-between rounded-[8px] px-2.5 py-[7px] text-left text-[13px] transition-colors"
-              style={{ background: cat === c ? "var(--accent)" : undefined, color: cat === c ? "white" : "var(--fg)" }}
+              style={{ background: cat === c ? "var(--accent)" : undefined, color: cat === c ? "white" : "var(--fg)", marginTop: c === APPS ? 10 : undefined }}
             >
               <span>{c}</span>
-              <span className="text-[11px] opacity-60">{c === "All" ? WIDGETS.length : counts.get(c)}</span>
+              <span className="text-[11px] opacity-60">{c === "All" ? shown.length : c === APPS ? (apps?.length ?? "") : counts.get(c)}</span>
             </button>
           ))}
         </nav>
@@ -120,9 +129,14 @@ export function Picker() {
         <div className="flex items-end justify-between px-6 pb-3 [-webkit-app-region:drag]">
           <div>
             <div className="text-[18px] font-semibold">{cat === "All" ? "All widgets" : cat}</div>
-            <div className="text-[12px]" style={{ color: "var(--fg2)" }}>Click a widget to add it to the dock. Drag tiles on the dock to reorder, or off it to remove.</div>
+            <div className="text-[12px]" style={{ color: "var(--fg2)" }}>
+              {cat === APPS ? "Any app as a widget of its own. Click one to add it; click again to take it off." : "Click a widget to add it to the dock. Drag tiles on the dock to reorder, or off it to remove."}
+            </div>
           </div>
         </div>
+        {cat === APPS ? (
+          <AppList apps={apps} q={q} />
+        ) : (
         <div className="thin-scroll flex-1 overflow-y-auto px-6 pb-8">
           <motion.div layout className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))" }}>
             <AnimatePresence initial={false}>
@@ -161,8 +175,64 @@ export function Picker() {
           </motion.div>
           {!list.length && <div className="py-16 text-center text-[13px]" style={{ color: "var(--fg2)" }}>No widgets match “{q}”</div>}
         </div>
+        )}
       </main>
     </div>
+  );
+}
+
+const APPS = "Your apps" as const;
+
+type StartApp = { name: string; id: string };
+
+function useStartApps(): StartApp[] | undefined {
+  const [apps, setApps] = useState<StartApp[] | undefined>();
+  useEffect(() => {
+    void window.vyse.invoke<StartApp[]>("apps:start").then((l) => setApps(l ?? []));
+  }, []);
+  return apps;
+}
+
+/** every app in Start; each one can sit on the dock as a widget of its own */
+function AppList({ apps, q }: { apps: StartApp[] | undefined; q: string }) {
+  const s = useSettings();
+  const mine = (a: StartApp) => s.widgets.find((w) => w.type === "app" && (w.config?.pin as Pin | undefined)?.aumid === a.id);
+  const toggle = async (a: StartApp) => {
+    const have = mine(a);
+    const widgets = useStore.getState().settings.widgets;
+    if (have) return setSettings({ widgets: widgets.filter((w) => w.uid !== have.uid) });
+    const pin = await window.vyse.invoke<Pin>("apps:pinFor", a);
+    setSettings({ widgets: [...useStore.getState().settings.widgets, { uid: uid(), type: "app", config: { pin } }] });
+  };
+  const needle = q.trim().toLowerCase();
+  const list = (apps ?? []).filter((a) => !needle || a.name.toLowerCase().includes(needle));
+  return (
+    <div className="thin-scroll flex-1 overflow-y-auto px-6 pb-8">
+      {!apps ? (
+        <div className="py-16 text-center text-[13px]" style={{ color: "var(--fg2)" }}>Reading the apps in Start...</div>
+      ) : !list.length ? (
+        <div className="py-16 text-center text-[13px]" style={{ color: "var(--fg2)" }}>No apps match “{q}”</div>
+      ) : (
+        <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))" }}>
+          {list.map((a) => (
+            <AppRow key={a.id} app={a} added={!!mine(a)} onClick={() => void toggle(a)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AppRow({ app, added, onClick }: { app: StartApp; added: boolean; onClick: () => void }) {
+  const icon = useIcon({ id: app.id, name: app.name, aumid: app.id }, 48);
+  return (
+    <button onClick={onClick} className="flex items-center gap-2.5 rounded-[12px] p-2 text-left transition-colors" style={{ background: added ? "rgb(10 132 255 / 0.12)" : "var(--chip)", outline: added ? "1.5px solid var(--accent)" : "1px solid transparent" }}>
+      {icon ? <img src={icon} className="h-8 w-8 shrink-0" /> : <span className="h-8 w-8 shrink-0 rounded-[25%]" style={{ background: "var(--chip-hover)" }} />}
+      <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium">{app.name}</span>
+      <span className="grid h-[22px] w-[22px] shrink-0 place-items-center rounded-full" style={{ background: added ? "var(--accent)" : "var(--chip-hover)", color: added ? "white" : "var(--fg)" }}>
+        {added ? <Check size={13} strokeWidth={3} /> : <Plus size={13} strokeWidth={2.5} />}
+      </span>
+    </button>
   );
 }
 

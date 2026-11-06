@@ -254,6 +254,14 @@ namespace VyseHost
                 d["minimized"] = Native.IsIconic(h);
                 d["active"] = h == fg;
                 d["flashing"] = flashing.Contains(h.ToInt64());
+                RECT wr;
+                if (Native.GetWindowRect(h, out wr))
+                {
+                    d["x"] = wr.left;
+                    d["y"] = wr.top;
+                    d["w"] = wr.right - wr.left;
+                    d["h"] = wr.bottom - wr.top;
+                }
                 list.Add(d);
                 return true;
             }, IntPtr.Zero);

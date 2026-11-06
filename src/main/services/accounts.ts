@@ -1,17 +1,19 @@
 // Widgets that read an account with your own key (revenue, analytics, social, Linear,
 // DeepSeek, LeetCode), plus a few more feeds: ChatGPT's Codex limits from its local logs,
 // the wallpaper gallery, temperature and the extra Quick Toggles switches.
-import { createWriteStream, existsSync, mkdirSync, readdirSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { app, ipcMain, net } from "electron";
-import { PROVIDERS, REVENUE_PROVIDERS, type ProviderData, type RevenueData } from "@shared/accounts";
+import { PROVIDERS, REVENUE_PROVIDERS, isConnected, type ProviderData, type RevenueData, type UsageData, type UsageWindow } from "@shared/accounts";
 import { host } from "../host";
 import { settings } from "../store";
 import { defineTopic, poller, refreshTopic } from "../topics";
 import { getJson, stripe } from "./online";
+import { initLocalAiTopics } from "./localai";
 
 type Keys = Record<string, string>;
 const day = (t: number) => new Date(t).toISOString().slice(0, 10);
@@ -22,6 +24,42 @@ async function postJson<T>(url: string, body: unknown, headers: Record<string, s
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
 }
+
+/** a date on this PC's calendar, not UTC's */
+const localDay = (t: number) => {
+  const d = new Date(t);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const lastDays = (n: number) => Array.from({ length: n }, (_, i) => localDay(Date.now() - (n - 1 - i) * 86400_000));
+const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+
+/** Node's own fetch: Chromium's drops a Cookie header set by hand */
+async function cookieJson<T>(url: string, headers: Record<string, string>): Promise<T> {
+  const res = await fetch(url, { headers: { "User-Agent": "VyseBar", Accept: "application/json", ...headers } });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return (await res.json()) as T;
+}
+
+/** an amount in cents, wherever the service put it: { val: "1234" }, "1234" or 1234 */
+function centsIn(o: any, keys: string[]): number | undefined {
+  const seen = new Set<unknown>();
+  const queue = [o];
+  while (queue.length) {
+    const cur = queue.shift();
+    if (!cur || typeof cur !== "object" || seen.has(cur)) continue;
+    seen.add(cur);
+    for (const k of keys) {
+      const v = cur[k];
+      const raw = v && typeof v === "object" ? (v.val ?? v.value ?? v.amount) : v;
+      if (raw != null && raw !== "" && Number.isFinite(Number(raw))) return Number(raw);
+    }
+    for (const v of Object.values(cur)) if (v && typeof v === "object") queue.push(v);
+  }
+  return undefined;
+}
+
+const usd = (cents: number) => `$${(cents / 100).toFixed(cents % 100 ? 2 : 0)}`;
+const cap = (t: string) => (t ? t[0].toUpperCase() + t.slice(1).replace(/_/g, " ") : t);
 
 /** 30 days of amounts by day, as the revenue widgets show them */
 function revenueOf(entries: { t: number; amount: number }[], currency: string): RevenueData {
@@ -202,6 +240,129 @@ const fetchers: Record<string, (k: Keys) => Promise<ProviderData>> = {
     return { kind: "count", value: u.follower_count ?? 0, label: u.display_name };
   },
 
+  async datafast(k) {
+    const h = { headers: { Authorization: `Bearer ${k.key}` } };
+    const tz = encodeURIComponent(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    const ago = (n: number) => localDay(Date.now() - n * 86400_000);
+    const overview = async (from: number, to: number) => {
+      const r = await getJson<any>(`https://datafa.st/api/v1/analytics/overview?startAt=${ago(from)}&endAt=${ago(to)}&timezone=${tz}`, h);
+      if (r.status && r.status !== "success") throw new Error(r.error?.message ?? r.message ?? "DataFast refused the request");
+      return (Array.isArray(r.data) ? r.data[0] : r.data) ?? {};
+    };
+    const [week, prev] = await Promise.all([overview(6, 0), overview(13, 7)]);
+    // visitors day by day, when the timeseries answers
+    let series: number[] | undefined;
+    try {
+      const t = await getJson<any>(`https://datafa.st/api/v1/analytics/timeseries?startAt=${ago(13)}&endAt=${ago(0)}&interval=day&timezone=${tz}`, h);
+      const rows: any[] = Array.isArray(t.data) ? t.data : (t.data?.timeseries ?? []);
+      if (rows.length > 1) series = rows.map((x) => num(x.visitors));
+    } catch {
+      /* the totals are enough */
+    }
+    const value = num(week.visitors);
+    const before = num(prev.visitors);
+    const revenue = num(week.revenue);
+    const label =
+      revenue > 0
+        ? `${new Intl.NumberFormat("en-US", { style: "currency", currency: week.currency || "USD", maximumFractionDigits: 0 }).format(revenue)} revenue`
+        : week.pageviews != null
+          ? `${num(week.pageviews).toLocaleString()} page views`
+          : undefined;
+    return { kind: "count", value, series, change: before ? ((value - before) / before) * 100 : undefined, label };
+  },
+
+  async supabase(k) {
+    const h = { headers: { Authorization: `Bearer ${k.token}` } };
+    let ref = k.project?.trim();
+    let name: string | undefined;
+    if (!ref) {
+      const projects = await getJson<any[]>("https://api.supabase.com/v1/projects", h);
+      if (!projects.length) throw new Error("No projects on this account");
+      ref = projects[0].id ?? projects[0].ref;
+      name = projects[0].name;
+    }
+    const r = await getJson<any>(`https://api.supabase.com/v1/projects/${encodeURIComponent(ref!)}/analytics/endpoints/usage.api-counts?interval=7day`, h);
+    if (r?.error) throw new Error(typeof r.error === "string" ? r.error : (r.error.message ?? "Supabase refused the request"));
+    const rows: any[] = Array.isArray(r) ? r : (r?.result ?? []);
+    const days = lastDays(7);
+    const byDay = new Map(days.map((d) => [d, 0]));
+    // timestamps come in microseconds, milliseconds or as text
+    const when = (ts: unknown) => {
+      const n = Number(ts);
+      if (!Number.isFinite(n)) return Date.parse(String(ts));
+      return n > 1e14 ? n / 1000 : n > 1e11 ? n : n * 1000;
+    };
+    for (const x of rows) {
+      const d = localDay(when(x.timestamp));
+      if (!byDay.has(d)) continue;
+      const total = num(x.total_rest_requests) + num(x.total_auth_requests) + num(x.total_storage_requests) + num(x.total_realtime_requests);
+      byDay.set(d, byDay.get(d)! + total);
+    }
+    const series = days.map((d) => byDay.get(d)!);
+    return { kind: "count", value: series.reduce((a, b) => a + b, 0), series, label: name ?? ref };
+  },
+
+  async grok(k) {
+    const h = { headers: { Authorization: `Bearer ${k.key}` } };
+    const team = encodeURIComponent(k.team.trim());
+    const r = await getJson<any>(`https://management-api.x.ai/v1/billing/teams/${team}/prepaid/balance`, h);
+    // prepaid credit is kept in cents, and xAI may write credit as a negative amount
+    const cents = centsIn(r, ["total", "balance", "amount"]) ?? 0;
+    let spent: number | undefined;
+    try {
+      const inv = await getJson<any>(`https://management-api.x.ai/v1/billing/teams/${team}/postpaid/invoice/preview`, h);
+      const c = centsIn(inv, ["totalWithCorr", "amountAfterVat", "total", "amount"]);
+      if (c != null) spent = Math.abs(c) / 100;
+    } catch {
+      /* prepaid only */
+    }
+    const balance = Math.abs(cents) / 100;
+    return { kind: "balance", balance, currency: "USD", available: balance > 0, spent };
+  },
+
+  async glm(k) {
+    const base = k.region === "china" ? "https://bigmodel.cn" : "https://api.z.ai";
+    // z.ai wants the bare key here, without "Bearer"
+    const r = await getJson<any>(`${base}/api/monitor/usage/quota/limit`, { headers: { Authorization: k.key, "Accept-Language": "en-US,en" } });
+    if (r.success === false || (r.code != null && r.code !== 200 && r.code !== 0)) throw new Error(r.code === 401 || r.code === 1000 ? "401 refused" : r.msg || "z.ai didn't send the limits");
+    const limits: any[] = r.data?.limits ?? [];
+    const pctOf = (l: any) => (l.percentage != null ? num(l.percentage) : num(l.usage) ? (num(l.currentValue) / num(l.usage)) * 100 : 0);
+    const windows: UsageWindow[] = [];
+    for (const l of limits.filter((x) => x.type === "TOKENS_LIMIT")) windows.push({ label: "5-hour tokens", used: pctOf(l), resetsAt: l.nextResetTime ? num(l.nextResetTime) : null });
+    for (const l of limits.filter((x) => x.type === "TIME_LIMIT"))
+      windows.push({
+        label: "Tool calls this month",
+        used: pctOf(l),
+        resetsAt: l.nextResetTime ? num(l.nextResetTime) : null,
+        detail: l.usage ? `${num(l.currentValue).toLocaleString()} of ${num(l.usage).toLocaleString()}` : undefined,
+      });
+    if (!windows.length) throw new Error("No coding plan on this key");
+    const plan = typeof r.data?.level === "string" ? `${cap(r.data.level)} plan` : undefined;
+    return { kind: "usage", plan, windows };
+  },
+
+  async cursor(k) {
+    const token = k.token.trim().replace(/^WorkosCursorSessionToken=/, "");
+    const r = await cookieJson<any>("https://cursor.com/api/usage-summary", { Cookie: `WorkosCursorSessionToken=${token}`, Origin: "https://cursor.com", Referer: "https://cursor.com/dashboard" });
+    const end = r.billingCycleEnd ? Date.parse(r.billingCycleEnd) : null;
+    const plan = r.individualUsage?.plan;
+    const windows: UsageWindow[] = [];
+    if (plan) {
+      windows.push({ label: "Included usage", used: num(plan.totalPercentUsed), resetsAt: end });
+      windows.push({ label: "Auto", used: num(plan.autoPercentUsed), resetsAt: end });
+      windows.push({ label: "Other models", used: num(plan.apiPercentUsed), resetsAt: end });
+    }
+    const notes: { label: string; value: string }[] = [];
+    // on-demand spend is in cents
+    const od = r.individualUsage?.onDemand?.enabled ? r.individualUsage.onDemand : r.teamUsage?.onDemand?.enabled ? r.teamUsage.onDemand : null;
+    if (od) notes.push({ label: "On-demand", value: num(od.limit) > 0 ? `${usd(Math.max(0, num(od.used)))} of ${usd(num(od.limit))}` : usd(Math.max(0, num(od.used))) });
+    const fmt = (t: number) => new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    if (r.billingCycleStart && end) notes.push({ label: "Billing period", value: `${fmt(Date.parse(r.billingCycleStart))} to ${fmt(end)}` });
+    if (!windows.length && !od) throw new Error("Cursor sent no usage: copy the cookie again");
+    const membership = typeof r.membershipType === "string" ? cap(r.membershipType) : undefined;
+    return { kind: "usage", plan: membership ? `${membership}${r.isUnlimited ? " · unlimited" : ""}` : undefined, windows, notes };
+  },
+
   async deepseek(k) {
     const r = await getJson<any>("https://api.deepseek.com/user/balance", { headers: { Authorization: `Bearer ${k.key}` } });
     const b = r.balance_infos?.[0];
@@ -232,17 +393,41 @@ const keysOf = (id: string): Keys | null => {
   const spec = PROVIDERS.find((p) => p.id === id);
   if (!spec) return null;
   const k = settings.value.providers[id] ?? {};
-  return spec.fields.every((f) => k[f.key]?.trim()) ? k : null;
+  return isConnected(spec, k) ? k : null;
 };
+
+// AI plans: the first window's share over the last day, for the card's chart (kept across restarts)
+const historyFile = join(app.getPath("userData"), "usage-history.json");
+let history: Record<string, { t: number; used: number }[]> = {};
+try {
+  history = JSON.parse(readFileSync(historyFile, "utf8"));
+} catch {
+  history = {};
+}
+export function remember(id: string, used: number): { t: number; used: number }[] {
+  const now = Date.now();
+  const list = (history[id] ?? []).filter((p) => now - p.t < 24 * 3600_000);
+  const last = list[list.length - 1];
+  const v = Math.round(used * 10) / 10;
+  // a point when it changes, and one every few minutes otherwise
+  if (last && last.used === v && now - last.t <= 4 * 60_000) return history[id] ?? list;
+  list.push({ t: now, used: v });
+  history[id] = list.slice(-400);
+  void writeFile(historyFile, JSON.stringify(history)).catch(() => undefined);
+  return history[id];
+}
+
+const isUsage = (id: string) => PROVIDERS.find((p) => p.id === id)?.kind === "usage";
 
 async function read(id: string, fresh = false): Promise<ProviderData | { error: string; connect?: boolean }> {
   const k = keysOf(id);
   if (!k) return { error: "Not connected", connect: true };
   const hit = cache.get(id);
-  if (!fresh && hit && Date.now() - hit.at < 10 * 60_000) return hit.value;
+  if (!fresh && hit && Date.now() - hit.at < (isUsage(id) ? 4 : 10) * 60_000) return hit.value;
   let value: ProviderData | { error: string };
   try {
     value = await fetchers[id](k);
+    if (value.kind === "usage" && value.windows[0]) value = { ...value, history: remember(id, value.windows[0].used) } satisfies UsageData;
   } catch (e) {
     const msg = (e as Error).message;
     value = { error: /^40[13]/.test(msg) ? "The key was refused - check it in the card" : `Couldn't reach ${PROVIDERS.find((p) => p.id === id)?.name ?? "Stripe"}: ${msg}` };
@@ -304,7 +489,8 @@ function codexUsage() {
           minutes: w.window_minutes ?? null,
           resetsAt: w.resets_at ? w.resets_at * 1000 : w.resets_in_seconds != null ? mtime + w.resets_in_seconds * 1000 : null,
         };
-      return { session: win(rl.primary), week: win(rl.secondary), plan: typeof rl.plan_type === "string" ? rl.plan_type : null, at: mtime };
+      const session = win(rl.primary);
+      return { session, week: win(rl.secondary), plan: typeof rl.plan_type === "string" ? rl.plan_type : null, at: mtime, history: session ? remember("codex", session.used) : [] };
     } catch {
       /* a partial line */
     }
@@ -338,17 +524,57 @@ async function setWallpaper(url: string, id: string) {
   return host.call("setWallpaper", { path: file });
 }
 
+// a new wallpaper on its own: once a day (the first check on a new day) or once a week
+const dayOf = (t: number) => new Date(t).toDateString();
+async function rotateWallpaper(force = false): Promise<void> {
+  const r = settings.value.wallpaperRotate;
+  if (r.every === "off") return;
+  const now = Date.now();
+  const due = force || !r.last || (r.every === "day" ? dayOf(now) !== dayOf(r.last) : now - r.last >= 7 * 86400_000 - 3600_000);
+  if (!due) return;
+  const list = (await wallpapers()) as { id: string; full: string }[];
+  if (!list.length) return;
+  const others = list.filter((p) => p.id !== r.current);
+  const pick = r.pick === "shuffle" ? (others.length ? others : list)[Math.floor(Math.random() * (others.length || list.length))] : list[0];
+  // today's picture is already up: nothing to change, but the day still counts as done
+  if (pick.id !== r.current) await setWallpaper(pick.full, pick.id);
+  settings.set({ wallpaperRotate: { ...settings.value.wallpaperRotate, last: now, current: pick.id } });
+}
+
 export function initAccountTopics(): void {
-  for (const p of PROVIDERS) defineTopic(`acct:${p.id}`, poller(() => read(p.id), 15 * 60_000));
+  // checked a minute after start (the network is up by then) and then every half hour
+  const tryRotate = (force = false) => void rotateWallpaper(force).catch((e) => console.error("wallpaper rotation:", (e as Error).message));
+  setTimeout(tryRotate, 60_000);
+  setInterval(tryRotate, 30 * 60_000);
+  settings.onChange((v, prev) => {
+    const a = v.wallpaperRotate;
+    const b = prev.wallpaperRotate;
+    // switched on, or how often / which picture changed: the first new one comes now
+    if (a.every !== "off" && (a.every !== b.every || a.pick !== b.pick)) tryRotate(true);
+  });
+  ipcMain.handle("wallpaper:next", () => rotateWallpaper(true));
+
+  // plan limits move faster than revenue
+  for (const p of PROVIDERS) defineTopic(`acct:${p.id}`, poller(() => read(p.id), (p.kind === "usage" ? 5 : 15) * 60_000));
   defineTopic("revenueTotal", poller(totalRevenue, 15 * 60_000));
   defineTopic("codex", poller(codexUsage, 60_000));
+  initLocalAiTopics();
   defineTopic("wallpapers", poller(wallpapers, 6 * 3600_000));
   defineTopic("temperature", poller(() => host.try("temperature"), 5000));
   defineTopic(
     "switches",
     poller(async () => {
-      const [keepAwake, mic, desktopIcons] = await Promise.all([host.try<boolean>("keepAwake"), host.try<{ muted: boolean } | null>("mic"), host.try<boolean | null>("desktopIcons")]);
-      return { keepAwake: !!keepAwake, mic: mic ? !mic.muted : null, desktopIcons };
+      const [keepAwake, mic, desktopIcons, energy, dnd, camera, hotspot, ethernet] = await Promise.all([
+        host.try<boolean>("keepAwake"),
+        host.try<{ muted: boolean } | null>("mic"),
+        host.try<boolean | null>("desktopIcons"),
+        host.try<{ on: boolean; available: boolean; always: boolean } | null>("energySaver"),
+        host.try<boolean | null>("dnd"),
+        host.try<boolean | null>("camera"),
+        host.try<{ on: boolean; clients: number; name?: string } | null>("hotspot"),
+        host.try<boolean | null>("ethernet"),
+      ]);
+      return { keepAwake: !!keepAwake, mic: mic ? !mic.muted : null, desktopIcons, energy, dnd, camera, hotspot, ethernet };
     }, 5000),
   );
 

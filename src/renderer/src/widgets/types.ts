@@ -57,6 +57,10 @@ export interface WidgetDef {
   single?: boolean;
   /** shown in the picker but needs an account first */
   account?: string;
+  /** not in the picker's grid: made some other way (the picker's list of apps) */
+  hidden?: boolean;
+  /** asks for its options (a folder, say) when added; each add is a new tile */
+  create?: () => Promise<Record<string, unknown> | null>;
 }
 
 export interface DockApi {

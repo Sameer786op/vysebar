@@ -119,13 +119,13 @@ namespace VyseHost
 
     public static class Audio
     {
-        const int eRender = 0, eMultimedia = 1, CLSCTX_ALL = 23, DEVICE_STATE_ACTIVE = 1;
+        const int eRender = 0, eCapture = 1, eMultimedia = 1, CLSCTX_ALL = 23, DEVICE_STATE_ACTIVE = 1;
 
-        static IMMDevice DefaultDevice()
+        static IMMDevice DefaultDevice(int flow = eRender)
         {
             IMMDeviceEnumerator en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCo();
             IMMDevice dev;
-            Marshal.ThrowExceptionForHR(en.GetDefaultAudioEndpoint(eRender, eMultimedia, out dev));
+            Marshal.ThrowExceptionForHR(en.GetDefaultAudioEndpoint(flow, eMultimedia, out dev));
             return dev;
         }
 
@@ -144,9 +144,9 @@ namespace VyseHost
             return Native.ReadString(store, Native.PKEY_Device_FriendlyName);
         }
 
-        public static object Get()
+        public static object Get(int flow = eRender)
         {
-            IMMDevice dev = DefaultDevice();
+            IMMDevice dev = DefaultDevice(flow);
             IAudioEndpointVolume vol = EndpointVolume(dev);
             float level; bool muted;
             vol.GetMasterVolumeLevelScalar(out level);
@@ -161,21 +161,32 @@ namespace VyseHost
             return d;
         }
 
-        public static object Set(double volume, object mute)
+        public static object Set(double volume, object mute, int flow = eRender)
         {
-            IAudioEndpointVolume vol = EndpointVolume(DefaultDevice());
+            IAudioEndpointVolume vol = EndpointVolume(DefaultDevice(flow));
             Guid ctx = Guid.Empty;
             if (volume >= 0) vol.SetMasterVolumeLevelScalar((float)Math.Max(0, Math.Min(1, volume / 100.0)), ref ctx);
             if (mute != null) vol.SetMute(Convert.ToBoolean(mute), ref ctx);
-            return Get();
+            return Get(flow);
         }
 
-        public static object Devices()
+        /// the default microphone: level, mute and name; null when there is none
+        public static object Mic()
+        {
+            try { return Get(eCapture); } catch { return null; }
+        }
+
+        public static object SetMic(double volume, object mute)
+        {
+            return Set(volume, mute, eCapture);
+        }
+
+        public static object Devices(int flow = eRender)
         {
             IMMDeviceEnumerator en = (IMMDeviceEnumerator)new MMDeviceEnumeratorCo();
             IMMDeviceCollection col;
             List<object> list = new List<object>();
-            if (en.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, out col) != 0) return list;
+            if (en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, out col) != 0) return list;
             uint n;
             col.GetCount(out n);
             for (uint i = 0; i < n; i++)
@@ -265,7 +276,8 @@ namespace VyseHost
         {
             IPolicyConfig pc = (IPolicyConfig)new PolicyConfigClient();
             for (int role = 0; role < 3; role++) Marshal.ThrowExceptionForHR(pc.SetDefaultEndpoint(id, role));
-            return Get();
+            // a device id names its flow: {0.0.1.00000000}... is a microphone, {0.0.0...} a speaker
+            return id != null && id.StartsWith("{0.0.1.") ? Get(eCapture) : Get();
         }
     }
 }

@@ -3,12 +3,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import {
   Camera, Download, FileText, FolderOpen, Globe, LayoutGrid, Lock, LogOut, Monitor, Moon, Power, RotateCw,
-  Scissors, Search, Settings2, SquareTerminal, TerminalSquare,
+  ScanText, Scissors, Search, Settings2, SquareTerminal, TerminalSquare,
 } from "lucide-react";
 import { bytes, relative } from "../lib/format";
-import { host, useNow, useTopic } from "../lib/state";
+import { host, useNow, useStore, useTopic } from "../lib/state";
 import { CardHeader, Empty } from "../components/ui";
-import type { CardProps, TileProps, WidgetDef } from "./types";
+import type { CardProps, MenuItem, TileProps, WidgetDef } from "./types";
 
 interface FileItem { name: string; path: string; size?: number; mtime: number; dir?: boolean; icon?: string; thumb?: string }
 interface Files { downloads: FileItem[]; screenshots: FileItem[]; recent: FileItem[] }
@@ -230,6 +230,49 @@ function ScreenshotsTile() {
   );
 }
 
+/** reads the text in a screenshot with Windows' own OCR and puts it on the clipboard */
+async function copyText(path: string): Promise<string> {
+  const text = await window.vyse.invoke<string>("ocr:copy", path);
+  return text ? `${text.split("\n").length} ${text.includes("\n") ? "lines" : "line"} copied` : "No text found";
+}
+
+function CopyText({ path }: { path: string }) {
+  const [state, setState] = useState<string | null>(null);
+  return (
+    <span
+      role="button"
+      title="Copy the text in this screenshot"
+      onClick={(e) => {
+        e.stopPropagation();
+        setState("Reading...");
+        copyText(path)
+          .then(setState, () => setState("Couldn't read it"))
+          .finally(() => setTimeout(() => setState(null), 2200));
+      }}
+      className="flex items-center gap-1 rounded-full px-1.5 py-[1px] font-semibold opacity-0 transition-opacity group-hover:opacity-100"
+      style={{ background: "var(--chip-hover)", color: "var(--fg)", opacity: state ? 1 : undefined }}
+    >
+      {state ? state : <><ScanText size={11} /> Copy text</>}
+    </span>
+  );
+}
+
+function screenshotsMenu(): MenuItem[] {
+  const latest = (useStore.getState().topics.files as Files | undefined)?.screenshots[0];
+  if (!latest) return [];
+  return [
+    {
+      label: "Copy text from the latest",
+      icon: <ScanText size={14} />,
+      onClick: () =>
+        void copyText(latest.path).then(
+          (title) => window.vyse.invoke("toast", { id: `ocr-${Date.now()}`, title, body: "From your latest screenshot", icon: "todo", ttl: 3000 }),
+          () => window.vyse.invoke("toast", { id: `ocr-${Date.now()}`, title: "Couldn't read that screenshot", ttl: 3000 }),
+        ),
+    },
+  ];
+}
+
 function ScreenshotsCard(_: CardProps) {
   const f = useTopic<Files>("files");
   const now = useNow(60_000);
@@ -240,9 +283,12 @@ function ScreenshotsCard(_: CardProps) {
       {s.length ? (
         <div className="grid grid-cols-2 gap-2">
           {s.map((x) => (
-            <button key={x.path} draggable onDragStart={(e) => drag(e, x)} onClick={() => open(x.path)} onContextMenu={(e) => { e.preventDefault(); reveal(x.path); }} className="group overflow-hidden rounded-[12px] text-left" style={{ background: "var(--chip)" }}>
+            <button key={x.path} draggable onDragStart={(e) => drag(e, x)} onClick={() => open(x.path)} onContextMenu={(e) => { e.preventDefault(); reveal(x.path); }} className="group relative overflow-hidden rounded-[12px] text-left" style={{ background: "var(--chip)" }}>
               <img src={x.thumb} className="aspect-[16/10] w-full object-cover transition-transform group-hover:scale-105" />
-              <div className="px-2 py-1 text-[10.5px]" style={{ color: "var(--fg2)" }}>{relative(x.mtime - now)}</div>
+              <div className="flex items-center justify-between px-2 py-1 text-[10.5px]" style={{ color: "var(--fg2)" }}>
+                <span>{relative(x.mtime - now)}</span>
+                <CopyText path={x.path} />
+              </div>
             </button>
           ))}
         </div>
@@ -299,7 +345,7 @@ export const fileWidgets: WidgetDef[] = [
   { type: "search", name: "Search", category: "Apps & Files", description: "Find any app or recent file, or search the web.", Tile: SearchTile, Card: SearchCard, cardWidth: 420, cardFocus: true },
   { type: "commands", name: "Commands", category: "Apps & Files", description: "Lock, sleep, restart, Task Manager and more in one grid.", Tile: CommandsTile, Card: CommandsCard, cardWidth: 340 },
   { type: "downloads", name: "Downloads", category: "Apps & Files", description: "Your latest download; drag files straight out of the card.", Tile: DownloadsTile, Card: DownloadsCard, cardWidth: 340 },
-  { type: "recentScreenshots", name: "Recent Screenshots", category: "Apps & Files", description: "Your last screenshots, ready to drag into a chat.", Tile: ScreenshotsTile, Card: ScreenshotsCard, cardWidth: 380 },
+  { type: "recentScreenshots", name: "Recent Screenshots", category: "Apps & Files", description: "Your last screenshots, ready to drag into a chat; copy the text out of any of them.", Tile: ScreenshotsTile, Card: ScreenshotsCard, cardWidth: 380, menu: screenshotsMenu },
   { type: "recentlyOpened", name: "Recently Opened", category: "Apps & Files", description: "The files you opened last.", Tile: RecentTile, Card: RecentCard, cardWidth: 340 },
   { type: "screenshotCapture", name: "Screenshot", category: "Apps & Files", description: "Start a screen snip with one click.", Tile: iconTile(<Camera size={16} />, "Snip", "#ff375f"), action: () => void host("snip") },
   { type: "showDesktop", name: "Show Desktop", category: "Apps & Files", description: "Minimise everything; click again to bring it back.", Tile: iconTile(<Monitor size={16} />, "Desktop", "#64d2ff"), action: () => void host("showDesktop") },
