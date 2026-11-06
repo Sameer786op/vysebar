@@ -148,10 +148,13 @@ Liquid Glass (live, refracting the desktop behind it), iOS (bright frosted glass
 Midnight and Clear (just the tiles). The dock can sit at the bottom or the top, float or span the
 full width, auto-hide, and show on one display or all of them.
 
-In Smooth mode the glass styles read the screen behind the dock, so Windows is told to leave the
-dock out of screen captures (otherwise the glass would refract itself). Screenshots and screen
-shares won't show the dock then; switch to Black, White or Midnight, or to Lite mode, when you
-want it in a screenshot.
+In Smooth mode the glass styles read the strip of screen behind the dock. They read it through
+Windows' Magnification API, which can leave VyseBar's own windows out, so the glass never shows
+the dock inside itself while the dock still appears in screenshots and screen shares, like the
+taskbar. On a PC where that API doesn't answer, VyseBar falls back to its old way: Windows is
+asked to keep the dock out of screen captures (otherwise the glass would refract itself), and
+screen shares show an empty strip where the dock is. `vysebar.log` says which one is in use;
+Black, White, Midnight and Lite mode always show in captures.
 
 ### Performance: Smooth and Lite
 

@@ -2,12 +2,13 @@
 // edge, tall enough for the cards that open out of the dock. Only the dock and open cards
 // take the mouse; everywhere else clicks fall through to the windows behind.
 import { join } from "node:path";
-import { readFileSync, existsSync } from "node:fs";
-import { BrowserWindow, ipcMain, nativeImage, powerMonitor, screen, type Display } from "electron";
+import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { app, BrowserWindow, ipcMain, nativeImage, powerMonitor, screen, type Display } from "electron";
 import type { DockInfo, WinInfo } from "@shared/types";
 import { host } from "./host";
 import { isLite, markActive, trimNow } from "./perf";
 import { settings } from "./store";
+import { log } from "./log";
 
 const MAX_WINDOW_H = 760;
 
@@ -71,9 +72,47 @@ const isGlass = () => {
   const s = settings.value;
   return s.style === "glass" || s.style === "ios" || (s.style === "clear" && s.clearTiles === "frosted");
 };
-// live glass reads the screen behind the dock, so the dock keeps itself out of screen captures;
-// lite glass is drawn from the wallpaper file, and the dock shows in screenshots like any window
-const hideFromCapture = () => isGlass() && !isLite();
+// live glass reads the screen behind the dock. The helper reads it with VyseBar's own windows
+// left out (the Magnification API), so the dock shows in screen shares and screenshots like the
+// taskbar. Only where that doesn't work (the helper says so) does the dock keep itself out of
+// captures, or the glass would show the dock inside itself. Until the helper has answered, it
+// stays out of them too. Lite glass is drawn from the wallpaper file and never needs this.
+let grabSkipsDock = false;
+const hideFromCapture = () => isGlass() && !isLite() && !grabSkipsDock;
+
+function setGrabSkipsDock(on: boolean): void {
+  if (on !== grabSkipsDock) log(on ? "glass: reads leave the dock out, so it shows in screen shares" : "glass: the dock is kept out of screen captures");
+  grabSkipsDock = on;
+  for (const dock of docks.values()) if (!dock.win.isDestroyed()) dock.win.setContentProtection(hideFromCapture());
+}
+
+// a helper that crashed in the middle of a magnifier read isn't asked to use it again by this
+// version of VyseBar (a new version tries once more): the old way is safe everywhere
+const gdiFlag = () => join(app.getPath("userData"), "glass-gdi.txt");
+function magnifierOff(): boolean {
+  try {
+    return readFileSync(gdiFlag(), "utf8").trim() === app.getVersion();
+  } catch {
+    return false;
+  }
+}
+function magnifierDied(err: unknown): void {
+  if ((err as Error)?.message !== "host crashed") return;
+  log("glass: the helper crashed during a magnifier read; this version keeps the dock out of captures from now on");
+  try {
+    writeFileSync(gdiFlag(), app.getVersion());
+  } catch {
+    /* it is only a hint */
+  }
+  setGrabSkipsDock(false);
+}
+function askGrabMode(): void {
+  const allow = !magnifierOff();
+  host
+    .call<{ excludes?: boolean }>("grabMode", { allow })
+    .then((r) => setGrabSkipsDock(allow && !!r?.excludes))
+    .catch((err) => (allow ? magnifierDied(err) : undefined));
+}
 
 // live glass reads the screen behind it about once a second while nothing moves; the pointer
 // moving or a window changing makes it look more often for a while (pinged at most 4x a second)
@@ -327,7 +366,12 @@ export function initDocks(): void {
   host.on("ready", () => {
     applyTaskbar();
     for (const dock of docks.values()) reserve(dock);
+    askGrabMode();
   });
+  // a new helper reads with GDI until it's asked: keep the dock out of captures till then
+  host.on("restarted", () => setGrabSkipsDock(false));
+  // the helper gave up on the magnifier (it stopped answering)
+  host.on("grabMode", (m: { excludes?: boolean }) => setGrabSkipsDock(!!m?.excludes && !magnifierOff()));
   host.on("explorerRestarted", () => {
     applyTaskbar();
     for (const dock of docks.values()) reserve(dock);
@@ -481,7 +525,14 @@ export function initDocks(): void {
     const s = Math.min(1, Math.max(0.1, Number(req.scale) || 0.25));
     const ow = Math.max(1, Math.round(r.width * s));
     const oh = Math.max(1, Math.round(r.height * s));
-    const g = await host.try<{ w: number; h: number; data: string }>("grab", { x: r.x, y: r.y, w: r.width, h: r.height, ow, oh });
+    const viaMagnifier = grabSkipsDock;
+    let g: { w: number; h: number; data: string } | null = null;
+    try {
+      g = await host.call<{ w: number; h: number; data: string } | null>("grab", { x: r.x, y: r.y, w: r.width, h: r.height, ow, oh });
+    } catch (err) {
+      if (viaMagnifier) magnifierDied(err);
+      return null;
+    }
     return g ? { w: g.w, h: g.h, top, bottom, data: Buffer.from(g.data, "base64") } : null;
   });
   ipcMain.on("dock:grabRelease", () => void host.try("grabRelease"));

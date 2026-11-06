@@ -39,9 +39,12 @@ class Host extends EventEmitter {
     proc.stderr.on("data", (d) => console.error("[host]", String(d).trim()));
     proc.on("exit", (code) => {
       this.proc = null;
+      // an exit code that is a Windows error status (0xC0000005 and the like) is a crash, not
+      // Windows closing it at shutdown or VyseBar stopping it
+      const crashed = typeof code === "number" && code >>> 0 >= 0xc0000000;
       for (const p of this.pending.values()) {
         clearTimeout(p.timer);
-        p.reject(new Error("host exited"));
+        p.reject(new Error(this.quitting ? "host stopped" : crashed ? "host crashed" : "host exited"));
       }
       this.pending.clear();
       if (this.quitting) return;

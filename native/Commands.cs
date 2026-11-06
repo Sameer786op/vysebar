@@ -111,6 +111,8 @@ namespace VyseHost
                     return Grab.Strip((int)Program.Long(a, "x", 0), (int)Program.Long(a, "y", 0), (int)Program.Long(a, "w", 0), (int)Program.Long(a, "h", 0),
                         (int)Program.Long(a, "ow", 0), (int)Program.Long(a, "oh", 0));
                 case "grabRelease": return Grab.Release();
+                // whether those reads leave VyseBar's own windows out (then the dock can show in screen shares)
+                case "grabMode": return Grab.Mode(Program.Bool(a, "allow", false));
                 // window previews (Thumbs.cs)
                 case "thumbs":
                     {
