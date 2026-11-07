@@ -3,7 +3,7 @@ import { host } from "./host";
 import { flushAll, settings } from "./store";
 import { registerTopicIpc } from "./topics";
 import { importTaskbarPins, initApps } from "./apps";
-import { applyLoginItem, registerIpc } from "./ipc";
+import { applyLoginItem, LOGIN_FLAG, registerIpc } from "./ipc";
 import { initSystemTopics } from "./services/system";
 import { initOnlineTopics } from "./services/online";
 import { initLocalTopics } from "./services/local";
@@ -30,7 +30,13 @@ if (!app.requestSingleInstanceLock()) {
   // for development: lets tooling inspect and screenshot the dock page
   if (!app.isPackaged && process.env.VYSE_DEBUG_PORT) app.commandLine.appendSwitch("remote-debugging-port", process.env.VYSE_DEBUG_PORT);
 
-  app.on("second-instance", () => openSettings());
+  // opening VyseBar again while it runs shows Settings. Windows starting it at sign-in after you
+  // already had, or a restart after an update or a hang, is not you asking for anything
+  app.on("second-instance", (_e, argv) => {
+    const flag = argv.find((a) => a === LOGIN_FLAG || a === "--updated" || a === "--recovered");
+    if (flag) log(`started again (${flag}) while running: nothing to open`);
+    else openSettings();
+  });
 
   // Windows shutting down, restarting or signing out doesn't quit apps the normal way: save
   // anything still waiting the moment Windows asks, before it ends the process
@@ -88,7 +94,7 @@ if (!app.requestSingleInstanceLock()) {
     initDocks();
     log(`ready: ${allDocks().length} dock${allDocks().length === 1 ? "" : "s"}`);
     step("memory trim", () => initMemoryTrim(allDocks));
-    step("start with Windows", applyLoginItem);
+    step("start with Windows", () => applyLoginItem());
     step("updates", initUpdates);
     watchMainThread();
   });

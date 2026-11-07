@@ -35,16 +35,34 @@ const REFRESH: Record<string, string[]> = {
 // startDrag needs a non-empty icon
 const EMPTY_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
-export function applyLoginItem(): void {
+// Windows starts VyseBar at sign-in with --login, so a sign-in start that finds VyseBar already
+// running (opened by hand before Windows got to it) steps aside without opening Settings
+export const LOGIN_FLAG = "--login";
+
+/** fromSettings: the switch in Settings was just flipped, rather than VyseBar starting */
+export function applyLoginItem(fromSettings = false): void {
   if (!app.isPackaged) return;
-  app.setLoginItemSettings({ openAtLogin: settings.value.launchAtStartup, path: process.execPath });
+  const path = process.execPath;
+  const args = [LOGIN_FLAG];
+  if (!settings.value.launchAtStartup) {
+    app.setLoginItemSettings({ openAtLogin: false, path, args });
+    return;
+  }
+  if (!fromSettings) {
+    const now = app.getLoginItemSettings({ path, args });
+    // already right: left alone, so VyseBar switched off under Task Manager › Startup apps stays off
+    if (now.openAtLogin) return;
+    // an older entry (without --login) that is switched off there stays off, and as it was
+    if (now.launchItems?.some((i) => i.name === "app.vysebar" && i.scope === "user" && !i.enabled)) return;
+  }
+  app.setLoginItemSettings({ openAtLogin: true, path, args });
 }
 
 export function registerIpc(): void {
   ipcMain.handle("settings:get", () => settings.value);
   ipcMain.handle("settings:set", (_e, patch: Partial<Settings>) => {
     const v = settings.set(patch);
-    if ("launchAtStartup" in patch) applyLoginItem();
+    if ("launchAtStartup" in patch) applyLoginItem(true);
     return v;
   });
   ipcMain.handle("data:get", () => data.value);
@@ -53,7 +71,7 @@ export function registerIpc(): void {
   // written to disk there and then
   ipcMain.on("settings:setNow", (e, patch: Partial<Settings>) => {
     settings.set(patch);
-    if ("launchAtStartup" in patch) applyLoginItem();
+    if ("launchAtStartup" in patch) applyLoginItem(true);
     settings.flush();
     e.returnValue = true;
   });
