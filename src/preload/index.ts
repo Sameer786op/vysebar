@@ -28,6 +28,9 @@ ipcRenderer.on("vyse:idle", () => {
   (globalThis as { gc?: () => void }).gc?.();
 });
 
+// main checks that the page still answers; a page stuck in a script can't, and is reloaded
+ipcRenderer.on("vyse:ping", () => ipcRenderer.send("vyse:pong"));
+
 contextBridge.exposeInMainWorld("vyse", api);
 
 export type VyseApi = typeof api;

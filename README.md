@@ -232,7 +232,7 @@ gh release create "v$v" --title "VyseBar $v" --notes "What changed" \
 - `src/main`: Electron main process. Dock windows and appbars (`docks.ts`), apps and pins
   (`apps.ts`), updates (`updater.ts`), IPC, settings store, memory trimming and Lite mode
   (`perf.ts`), and the data feeds in `services/` (system, local, online, accounts,
-  automations).
+  automations, and the calendar-file reader `ics.ts`).
 - `src/preload`: the `window.vyse` bridge.
 - `src/shared`: types, and the list of account services (`accounts.ts`) that the fetchers, the
   Accounts page and the connect forms all read.
@@ -244,8 +244,9 @@ gh release create "v$v" --title "VyseBar $v" --notes "What changed" \
   (`JumpTasks.cs`), Win+1...9, Win+T and Alt+T (`Hotkeys.cs`), peek (`Peek.cs`), the
   notification area (`Tray.cs`), the strip of screen behind the live glass (`Grab.cs`), window
   previews (`Thumbs.cs`), Bluetooth batteries, Do not disturb, energy saver, the hotspot, the
-  camera switch and Ethernet (`Devices.cs`), text from screenshots (`Ocr.cs`) and memory
-  trimming. It speaks JSON lines over stdio. Anything slow runs
+  camera switch and Ethernet (`Devices.cs`), text from screenshots (`Ocr.cs`), memory
+  trimming, and the watchdog that starts VyseBar again if it stops answering (`Watchdog.cs`).
+  It speaks JSON lines over stdio. Anything slow runs
   there rather than in Electron's main process, because that process also passes the mouse
   through the dock: when it stalls, the whole pointer stutters.
 - `scripts`: helper and icon build scripts.
@@ -262,6 +263,13 @@ publishing its buttons (and their badges) to accessibility tools, and the remain
 (taking over the taskbar's ITaskbarList messages) would only see apps started after VyseBar and
 could break features apps rely on.
 
+VyseBar puts itself right when part of it stops answering. A dock page that hasn't answered for
+30 seconds is reloaded. The helper is asked every 10 seconds and started again after three
+misses. The helper in turn asks VyseBar's own window thread every 5 seconds, and after about 45
+seconds without an answer it ends VyseBar, puts the taskbar back and starts VyseBar again. Quit
+always finishes within a few seconds.
+
 Settings and data live in `%APPDATA%\VyseBar`. So does `vysebar.log`, a short record of when
-VyseBar started, quit, updated or crashed (no window titles, file names or anything you typed),
-which helps when the dock didn't come up after signing in. It keeps itself under 256 KB.
+VyseBar started, quit, updated or crashed, and of anything it had to put right by itself (no
+window titles, file names or anything you typed). It helps when the dock didn't come up after
+signing in or stopped answering. It keeps itself under 256 KB.

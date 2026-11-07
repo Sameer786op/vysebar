@@ -42,18 +42,18 @@ export function refreshTopic(name: string): void {
   if (t?.running) t.source.refresh?.();
 }
 
-/** keeps a topic running even with no window subscribed (automations read it) */
+const pinned = new Set<string>();
+
+/**
+ * keeps a topic running even with no window subscribed (automations read it), also after the
+ * last card or tile that showed it has gone
+ */
 export function keepAlive(name: string): void {
+  pinned.add(name);
   const t = topics.get(name);
   if (!t || t.running) return;
   t.running = true;
   t.source.start((d) => publish(name, d));
-}
-
-const pinned = new Set<string>();
-export function pin(name: string): void {
-  pinned.add(name);
-  keepAlive(name);
 }
 
 function unsubscribe(name: string, id: number): void {
@@ -96,6 +96,9 @@ export function registerTopicIpc(): void {
 export function poller(fn: () => Promise<unknown> | unknown, ms: number): TopicSource {
   let timer: NodeJS.Timeout | null = null;
   let pub: ((d: unknown) => void) | null = null;
+  // each start begins a new run: a poll still on its way from an earlier run ends that run
+  // instead of carrying on beside the new one (which would poll twice as often from then on)
+  let run = 0;
   const tick = async () => {
     try {
       const v = await fn();
@@ -104,20 +107,28 @@ export function poller(fn: () => Promise<unknown> | unknown, ms: number): TopicS
       console.error("topic poll failed:", (e as Error).message);
     }
   };
+  // a poll that never settles mustn't stop the feed for good: after a while the next one goes ahead
+  const settled = (p: Promise<void>) => {
+    let t: NodeJS.Timeout | undefined;
+    const late = new Promise<void>((r) => (t = setTimeout(r, Math.max(2 * ms, 120_000))));
+    return Promise.race([p, late]).finally(() => clearTimeout(t));
+  };
   // in lite mode the fast topics (stats, volume, network) poll half as often
-  const next = () => {
+  const next = (r: number) => {
     timer = setTimeout(async () => {
-      await tick();
-      if (pub) next();
+      await settled(tick());
+      if (pub && r === run) next(r);
     }, ms < 10_000 && isLite() ? ms * 2 : ms);
   };
   return {
     start(publishFn) {
       pub = publishFn;
+      const r = ++run;
       void tick();
-      next();
+      next(r);
     },
     stop() {
+      run++;
       if (timer) clearTimeout(timer);
       timer = null;
       pub = null;

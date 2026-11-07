@@ -72,12 +72,20 @@ namespace VyseHost
 
             Timer fast = new Timer();
             fast.Interval = 80;
-            fast.Tick += delegate { if (dirty) { dirty = false; Emit(); } };
+            fast.Tick += delegate
+            {
+                try { if (dirty) { dirty = false; Emit(); } }
+                catch (Exception e) { Program.LogError("window list", e); }
+            };
             fast.Start();
 
             Timer slow = new Timer();
             slow.Interval = 500;
-            slow.Tick += delegate { CheckFullscreen(); Taskbar.Watchdog(); };
+            slow.Tick += delegate
+            {
+                try { CheckFullscreen(); Taskbar.Watchdog(); }
+                catch (Exception e) { Program.LogError("fullscreen check", e); }
+            };
             slow.Start();
 
             Timer refresh = new Timer();
@@ -89,13 +97,17 @@ namespace VyseHost
         static void OnWinEvent(IntPtr hook, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
         {
             if (idObject != 0 || idChild != 0) return; // OBJID_WINDOW, CHILDID_SELF only
-            if (ev == Native.EVENT_SYSTEM_FOREGROUND)
+            try
             {
-                OnForeground(hwnd);
-                dirty = true;
-                return;
+                if (ev == Native.EVENT_SYSTEM_FOREGROUND)
+                {
+                    OnForeground(hwnd);
+                    dirty = true;
+                    return;
+                }
+                if (ev == Native.EVENT_OBJECT_NAMECHANGE && !IsAppWindow(hwnd)) return;
             }
-            if (ev == Native.EVENT_OBJECT_NAMECHANGE && !IsAppWindow(hwnd)) return;
+            catch (Exception e) { Program.LogError("window event", e); }
             dirty = true;
         }
 
@@ -322,9 +334,14 @@ namespace VyseHost
             INPUT[] input = new INPUT[1];
             input[0].type = Native.INPUT_MOUSE;
             Native.SendInput(1, input, Marshal.SizeOf(typeof(INPUT)));
-            if (Native.SetForegroundWindow(h)) { Native.BringWindowToTop(h); return; }
+            // BringWindowToTop and AttachThreadInput wait on the other window's thread: with an app
+            // that has stopped answering they would hang here too, so it is only asked to come up
+            bool hung = Native.IsHungAppWindow(h);
+            if (Native.SetForegroundWindow(h)) { if (!hung) Native.BringWindowToTop(h); return; }
+            IntPtr fg = Native.GetForegroundWindow();
+            if (hung || (fg != IntPtr.Zero && Native.IsHungAppWindow(fg))) return;
             uint pid;
-            uint fgThread = Native.GetWindowThreadProcessId(Native.GetForegroundWindow(), out pid);
+            uint fgThread = Native.GetWindowThreadProcessId(fg, out pid);
             uint cur = Native.GetCurrentThreadId();
             Native.AttachThreadInput(cur, fgThread, true);
             Native.SetForegroundWindow(h);
@@ -402,11 +419,13 @@ namespace VyseHost
             SetState(main, Native.ABS_AUTOHIDE | Native.ABS_ALWAYSONTOP);
             if (autoHideOnly)
             {
-                if (hidden) foreach (IntPtr bar in Bars()) Native.ShowWindow(bar, Native.SW_SHOWNA);
+                if (hidden) foreach (IntPtr bar in Bars()) Native.ShowWindowAsync(bar, Native.SW_SHOWNA);
                 hidden = false;
                 return;
             }
-            foreach (IntPtr bar in Bars()) Native.ShowWindow(bar, Native.SW_HIDE);
+            // Explorer's windows: ShowWindowAsync leaves the request with Explorer, where ShowWindow
+            // would wait for it (for ever, if Explorer has stopped answering)
+            foreach (IntPtr bar in Bars()) Native.ShowWindowAsync(bar, Native.SW_HIDE);
             hidden = true;
         }
 
@@ -422,7 +441,7 @@ namespace VyseHost
                 try { File.Delete(StateFile); } catch { }
                 wasHidden = true;
             }
-            if (wasHidden) foreach (IntPtr bar in Bars()) Native.ShowWindow(bar, Native.SW_SHOWNA);
+            if (wasHidden) foreach (IntPtr bar in Bars()) Native.ShowWindowAsync(bar, Native.SW_SHOWNA);
         }
 
         public static void RecoverFromCrash()
@@ -440,7 +459,7 @@ namespace VyseHost
             if (!hidden) return;
             foreach (IntPtr bar in Bars())
             {
-                if (Native.IsWindowVisible(bar)) Native.ShowWindow(bar, Native.SW_HIDE);
+                if (Native.IsWindowVisible(bar)) Native.ShowWindowAsync(bar, Native.SW_HIDE);
             }
         }
     }

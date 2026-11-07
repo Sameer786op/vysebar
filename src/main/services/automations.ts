@@ -1,6 +1,7 @@
 // The dock stepping in on its own: timers that ring, reminders before events, music paused
 // for meetings, warnings before an AI session runs out or a drive fills up. Quiet hours hold
 // the sounds.
+import { powerMonitor } from "electron";
 import type { CalEvent, Data, Toast } from "@shared/types";
 import { broadcast } from "../broadcast";
 import { host } from "../host";
@@ -77,6 +78,8 @@ const once = (key: string, fn: () => void) => {
   fn();
 };
 
+let lastStorageCheck = 0;
+
 function allEvents(): CalEvent[] {
   const ics = lastValue<{ events: CalEvent[] }>("calendars")?.events ?? [];
   return [...data.value.events, ...ics];
@@ -119,8 +122,10 @@ async function check(): Promise<void> {
     }
   }
 
-  if (a.storageLow) {
-    for (const d of drives()) {
+  // drives fill slowly: a look every few minutes is plenty
+  if (a.storageLow && now - lastStorageCheck >= 5 * 60_000) {
+    lastStorageCheck = now;
+    for (const d of await drives()) {
       if (d.free / d.total < 0.07) once(`disk:${d.letter}:${new Date().toDateString()}`, () => toast({ title: `${d.letter}: is almost full`, body: `${(d.free / 1e9).toFixed(1)} GB left`, icon: "storage", accent: "#ff453a", tone: false }));
     }
   }
@@ -131,6 +136,9 @@ export function initAutomations(): void {
   data.onChange((v, prev) => {
     if (v.timer !== prev.timer || v.pomodoro !== prev.pomodoro) scheduleTimers(v);
   });
+  // after the PC sleeps, a timer or focus round that ran out meanwhile rings now, by the clock
+  // on the wall rather than however long the sleeping timer still thinks it has
+  powerMonitor.on("resume", () => scheduleTimers(data.value));
   // reminders need these feeds even when no widget shows them
   keepAlive("calendars");
   keepAlive("claude");

@@ -99,7 +99,9 @@ namespace VyseHost
             bool visible = list != IntPtr.Zero && Native.IsWindowVisible(list);
             if (show != null && Convert.ToBoolean(show) != visible)
             {
-                SendMessage(dv, WM_COMMAND, new IntPtr(TOGGLE_DESKTOP_ICONS), IntPtr.Zero);
+                // Explorer's window: an Explorer that has stopped answering gets a few seconds, not for ever
+                IntPtr r;
+                if (Native.SendMessageTimeout(dv, WM_COMMAND, new IntPtr(TOGGLE_DESKTOP_ICONS), IntPtr.Zero, 2 /* SMTO_ABORTIFHUNG */, 3000, out r) == IntPtr.Zero) return visible;
                 visible = !visible;
             }
             return visible;
@@ -110,22 +112,28 @@ namespace VyseHost
             return SystemParametersInfo(SPI_SETDESKWALLPAPER, 0, path, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
         }
 
-        /// the folders in File Explorer's Quick access; Shell.Application wants the STA UI thread
+        /// the folders in File Explorer's Quick access (on the shell's STA thread, Sta in Shell.cs)
         public static object QuickAccess()
         {
             List<object> list = new List<object>();
             Type t = Type.GetTypeFromProgID("Shell.Application");
             if (t == null) return list;
             dynamic shell = Activator.CreateInstance(t);
+            DateTime until = DateTime.UtcNow.AddSeconds(3);
             try
             {
                 dynamic folder = shell.NameSpace("shell:::{679f85cb-0220-4080-b29b-5540cc05aab6}");
                 if (folder == null) return list;
                 foreach (dynamic item in folder.Items())
                 {
-                    // the shell counts .zip files as folders; only real directories belong here
+                    // a menu is waiting for these: what came in time is enough
+                    if (DateTime.UtcNow > until) break;
+                    // the shell counts .zip files as folders; only real directories belong here. A
+                    // network folder isn't looked up on disk (an offline one takes long to say so)
                     string path = item.Path;
-                    if (string.IsNullOrEmpty(path) || !System.IO.Directory.Exists(path)) continue;
+                    if (string.IsNullOrEmpty(path)) continue;
+                    if (path.StartsWith(@"\\")) { if (System.IO.Path.GetExtension(path).Length > 0) continue; }
+                    else if (!System.IO.Directory.Exists(path)) continue;
                     Dictionary<string, object> d = new Dictionary<string, object>();
                     d["name"] = (string)item.Name;
                     d["path"] = path;

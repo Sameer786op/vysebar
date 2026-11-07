@@ -1,5 +1,6 @@
 // Feeds read from this PC only: Claude Code usage, screen time, downloads and screenshots.
-import { closeSync, existsSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { access, open, readdir, stat, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -8,6 +9,7 @@ import { host } from "../host";
 import { getIcon } from "../apps";
 import { settings } from "../store";
 import { defineTopic, poller } from "../topics";
+import { writeFileAtomic } from "../files";
 
 // ---------- Claude Code: tokens from its local history, in 5-hour session windows ----------
 
@@ -24,16 +26,20 @@ const offsets = new Map<string, { size: number; offset: number; rest: string }>(
 const seen = new Set<string>();
 let usage: Usage[] = [];
 
-// history files grow to hundreds of megabytes, so they are read a few megabytes at a time
-const CHUNK = 4 * 1024 * 1024;
+// History files grow to hundreds of megabytes. They are read a megabyte at a time, off the main
+// thread, so the dock (and the pointer, which waits on VyseBar's main thread while it is over
+// the dock) carries on between pieces instead of stopping until the whole read is done.
+const CHUNK = 1024 * 1024;
+// how far apart the first look at a big file probes for where the last eight days begin
+const STEP = 4 * 1024 * 1024;
 
 /** calls onLine for each complete line in [start, end); returns the unfinished last line */
-function readLines(fd: number, start: number, end: number, carry: string, onLine: (line: string) => void): string {
+async function readLines(fh: FileHandle, start: number, end: number, carry: string, onLine: (line: string) => void): Promise<string> {
   const buf = Buffer.alloc(Math.max(1, Math.min(CHUNK, end - start)));
   const dec = new StringDecoder("utf8");
   let rest = carry;
   for (let pos = start; pos < end; ) {
-    const n = readSync(fd, buf, 0, Math.min(buf.length, end - pos), pos);
+    const { bytesRead: n } = await fh.read(buf, 0, Math.min(buf.length, end - pos), pos);
     if (n <= 0) break;
     pos += n;
     const lines = (rest + dec.write(buf.subarray(0, n))).split("\n");
@@ -44,23 +50,30 @@ function readLines(fd: number, start: number, end: number, carry: string, onLine
 }
 
 /** the first timestamp logged at or after pos, or null */
-function timestampNear(fd: number, pos: number): number | null {
+async function timestampNear(fh: FileHandle, pos: number): Promise<number | null> {
   const buf = Buffer.alloc(256 * 1024);
-  const n = readSync(fd, buf, 0, buf.length, pos);
+  const { bytesRead: n } = await fh.read(buf, 0, buf.length, pos);
   const m = /"timestamp":"([^"]+)"/.exec(buf.toString("utf8", 0, n));
   return m ? Date.parse(m[1]) : null;
 }
 
-/** where a file's last `since` ms begin: steps back from the end a chunk at a time */
-function startOfRecent(fd: number, size: number, since: number): number {
-  for (let pos = size - CHUNK; pos > 0; pos -= CHUNK) {
-    const t = timestampNear(fd, pos);
+/** where a file's last `since` ms begin: steps back from the end a few megabytes at a time */
+async function startOfRecent(fh: FileHandle, size: number, since: number): Promise<number> {
+  for (let pos = size - STEP; pos > 0; pos -= STEP) {
+    const t = await timestampNear(fh, pos);
     if (t !== null && t < since) return pos;
   }
   return 0;
 }
 
-function scanClaude(): void {
+// a refresh that comes while a scan is under way waits for it rather than reading beside it
+let scanning: Promise<void> | null = null;
+function scanClaude(): Promise<void> {
+  scanning ??= readClaude().finally(() => (scanning = null));
+  return scanning;
+}
+
+async function readClaude(): Promise<void> {
   if (!existsSync(claudeDir)) return;
   const cutoff = Date.now() - 8 * 86400_000;
   const onLine = (line: string) => {
@@ -87,11 +100,11 @@ function scanClaude(): void {
       /* a partial line */
     }
   };
-  for (const project of readdirSync(claudeDir)) {
+  for (const project of await readdir(claudeDir).catch(() => [] as string[])) {
     const dir = join(claudeDir, project);
     let files: string[];
     try {
-      files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+      files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl"));
     } catch {
       continue;
     }
@@ -99,16 +112,16 @@ function scanClaude(): void {
       const file = join(dir, f);
       let st;
       try {
-        st = statSync(file);
+        st = await stat(file);
       } catch {
         continue;
       }
       if (st.mtimeMs < cutoff) continue;
       const prev = offsets.get(file);
       if (prev && st.size === prev.size) continue;
-      let fd: number;
+      let fh: FileHandle;
       try {
-        fd = openSync(file, "r");
+        fh = await open(file, "r");
       } catch {
         continue;
       }
@@ -118,11 +131,11 @@ function scanClaude(): void {
         let start = resume ? resume.offset : 0;
         // first look at a big file: jump to where the last eight days begin, which lands mid-line
         let skipPartial = false;
-        if (!resume && st.size > CHUNK) {
-          start = startOfRecent(fd, st.size, cutoff);
+        if (!resume && st.size > STEP) {
+          start = await startOfRecent(fh, st.size, cutoff);
           skipPartial = start > 0;
         }
-        const rest = readLines(fd, start, st.size, resume?.rest ?? "", (line) => {
+        const rest = await readLines(fh, start, st.size, resume?.rest ?? "", (line) => {
           if (skipPartial) {
             skipPartial = false;
             return;
@@ -130,16 +143,18 @@ function scanClaude(): void {
           onLine(line);
         });
         offsets.set(file, { size: st.size, offset: st.size, rest });
+      } catch {
+        /* the file went away or was locked mid-read: the next look tries again */
       } finally {
-        closeSync(fd);
+        await fh.close().catch(() => undefined);
       }
     }
   }
   usage = usage.filter((u) => u.t >= cutoff).sort((a, b) => a.t - b.t);
 }
 
-function claudeSummary() {
-  scanClaude();
+async function claudeSummary() {
+  await scanClaude();
   if (!existsSync(claudeDir)) return { error: "Claude Code isn't on this PC" };
   const H5 = 5 * 3600_000;
   // session windows as Claude counts them: 5 hours from the first message's hour
@@ -263,7 +278,7 @@ async function screenTimeSummary() {
 function saveScreenTime(): void {
   const keep = new Set(Array.from({ length: 30 }, (_, i) => dayKey(new Date(Date.now() - i * 86400_000))));
   for (const k of Object.keys(st.days)) if (!keep.has(k)) delete st.days[k];
-  writeFileSync(stFile, JSON.stringify(st));
+  writeFileAtomic(stFile, JSON.stringify(st));
 }
 
 export function screenTimeToday(): number {
@@ -272,21 +287,41 @@ export function screenTimeToday(): number {
 
 // ---------- files ----------
 
-function latest(dir: string, filter: (f: string) => boolean, n: number) {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter(filter)
-    .map((f) => {
-      try {
-        const s = statSync(join(dir, f));
-        return { name: f, path: join(dir, f), size: s.size, mtime: s.mtimeMs, dir: s.isDirectory() };
-      } catch {
-        return null;
-      }
-    })
-    .filter((x): x is NonNullable<typeof x> => !!x && !x.name.startsWith("."))
+/** the newest n entries of a folder, read off the main thread (Downloads can hold thousands) */
+async function latest(dir: string, filter: (f: string) => boolean, n: number) {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return [];
+  }
+  const items = await Promise.all(
+    names
+      .filter((f) => filter(f) && !f.startsWith("."))
+      .map(async (f) => {
+        try {
+          const s = await stat(join(dir, f));
+          return { name: f, path: join(dir, f), size: s.size, mtime: s.mtimeMs, dir: s.isDirectory() };
+        } catch {
+          return null;
+        }
+      }),
+  );
+  return items
+    .filter((x): x is NonNullable<typeof x> => !!x)
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, n);
+}
+
+/** a recent file still there; one on a network share that doesn't answer soon counts as gone */
+async function stillThere(path: string): Promise<boolean> {
+  let t: NodeJS.Timeout | undefined;
+  const late = new Promise<boolean>((r) => (t = setTimeout(() => r(false), 2000)));
+  try {
+    return await Promise.race([access(path).then(() => true, () => false), late]);
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 async function filesSummary() {
@@ -294,10 +329,10 @@ async function filesSummary() {
   const shots = join(app.getPath("pictures"), "Screenshots");
   const recentDir = join(process.env.APPDATA ?? "", "Microsoft", "Windows", "Recent");
   const dl = await Promise.all(
-    latest(downloads, (f) => !/\.(crdownload|part|tmp)$/i.test(f), 6).map(async (f) => ({ ...f, icon: await getIcon(f.path, 32) })),
+    (await latest(downloads, (f) => !/\.(crdownload|part|tmp)$/i.test(f), 6)).map(async (f) => ({ ...f, icon: await getIcon(f.path, 32) })),
   );
   const ss = await Promise.all(
-    latest(shots, (f) => /\.(png|jpe?g)$/i.test(f), 6).map(async (f) => {
+    (await latest(shots, (f) => /\.(png|jpe?g)$/i.test(f), 6)).map(async (f) => {
       let thumb: string | undefined;
       try {
         thumb = (await nativeImage.createThumbnailFromPath(f.path, { width: 240, height: 140 })).toDataURL();
@@ -307,16 +342,18 @@ async function filesSummary() {
       return { ...f, thumb };
     }),
   );
+  const targets = await Promise.all(
+    (await latest(recentDir, (f) => f.toLowerCase().endsWith(".lnk"), 24)).map(async (f) => {
+      try {
+        const target = shell.readShortcutLink(f.path).target;
+        return target && (await stillThere(target)) ? { name: basename(target), path: target, mtime: f.mtime } : null;
+      } catch {
+        return null;
+      }
+    }),
+  );
   const recent = await Promise.all(
-    latest(recentDir, (f) => f.toLowerCase().endsWith(".lnk"), 24)
-      .map((f) => {
-        try {
-          const target = shell.readShortcutLink(f.path).target;
-          return target && existsSync(target) ? { name: basename(target), path: target, mtime: f.mtime } : null;
-        } catch {
-          return null;
-        }
-      })
+    targets
       .filter((x): x is NonNullable<typeof x> => !!x)
       .slice(0, 8)
       .map(async (f) => ({ ...f, icon: await getIcon(f.path, 32) })),

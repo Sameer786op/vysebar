@@ -12,11 +12,11 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { app, ipcMain, net, safeStorage, shell } from "electron";
+import { app, ipcMain, safeStorage, shell } from "electron";
 import type { GoogleProfile } from "@shared/types";
 import { settings } from "../store";
 import { defineTopic, poller, publish, refreshTopic } from "../topics";
-import { getJson } from "./online";
+import { getJson, request } from "./online";
 
 const AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN = "https://oauth2.googleapis.com/token";
@@ -86,7 +86,7 @@ const b64url = (b: Buffer) => b.toString("base64").replace(/\+/g, "-").replace(/
 type Tokens = { id_token?: string; refresh_token?: string; access_token?: string; expires_in?: number; scope?: string; error?: string; error_description?: string };
 
 async function tokenRequest(body: Record<string, string>): Promise<Tokens> {
-  const res = await net.fetch(TOKEN, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(body).toString() });
+  const res = await request(TOKEN, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(body).toString() });
   const j = (await res.json().catch(() => ({}))) as Tokens;
   if (!res.ok || j.error) throw Object.assign(new Error(j.error_description || j.error || `${res.status} ${res.statusText}`), { code: j.error });
   return j;
@@ -103,7 +103,7 @@ async function photoOf(url: unknown): Promise<string | null> {
   try {
     // Google's picture links end in a size; ask for one sharp enough for a 2x tile
     const sized = /=s\d+(-c)?$/.test(url) ? url.replace(/=s\d+(-c)?$/, "=s192-c") : url;
-    const res = await net.fetch(sized);
+    const res = await request(sized);
     if (!res.ok) return null;
     const type = res.headers.get("content-type") || "image/jpeg";
     return `data:${type};base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`;
@@ -219,7 +219,7 @@ async function signOut(): Promise<void> {
   access = null;
   rmSync(scopesFile, { force: true });
   if (settings.value.startTile === "google") settings.set({ startTile: "windows" });
-  if (token) await net.fetch(`${REVOKE}?token=${encodeURIComponent(token)}`, { method: "POST" }).catch(() => undefined);
+  if (token) await request(`${REVOKE}?token=${encodeURIComponent(token)}`, { method: "POST" }).catch(() => undefined);
 }
 
 /** a changed name or photo comes through once a day */
@@ -317,7 +317,7 @@ async function searchConsole() {
     const want = settings.value.google.searchSite;
     const site = want && sites.includes(want) ? want : sites[0];
     const ago = (n: number) => localDay(Date.now() - n * 86400_000);
-    const res = await net.fetch(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site)}/searchAnalytics/query`, {
+    const res = await request(`https://www.googleapis.com/webmasters/v3/sites/${encodeURIComponent(site)}/searchAnalytics/query`, {
       method: "POST",
       headers: { ...auth, "Content-Type": "application/json" },
       body: JSON.stringify({ startDate: ago(33), endDate: ago(0), dimensions: ["date"], rowLimit: 100 }),

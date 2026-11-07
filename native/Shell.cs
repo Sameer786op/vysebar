@@ -19,33 +19,79 @@ using Windows.Devices.Radios;
 namespace VyseHost
 {
     // Shell COM objects want a single-threaded apartment; this thread is one, with a queue
+    // A shell extension can hang inside a call (a thumbnail of a file on a sleeping network
+    // drive, a folder that doesn't answer): then that thread is left to it, its caller gets an
+    // error, and a fresh thread takes the rest of the queue, so icons and menus never stop.
     public static class Sta
     {
-        static readonly BlockingCollection<Action> queue = new BlockingCollection<Action>();
-        static Thread thread;
+        class Job { public Action Run, Fail; }
+
+        class Worker
+        {
+            public readonly BlockingCollection<Job> Queue = new BlockingCollection<Job>();
+            public volatile Job Busy;
+            public int Since;
+        }
+
+        const int StuckMs = 15000;
+        static readonly object gate = new object();
+        static Worker current;
+        static Timer watch;
 
         public static Task<T> Run<T>(Func<T> fn)
         {
-            if (thread == null)
-            {
-                lock (queue)
-                {
-                    if (thread == null)
-                    {
-                        thread = new Thread(delegate () { foreach (Action a in queue.GetConsumingEnumerable()) a(); });
-                        thread.SetApartmentState(ApartmentState.STA);
-                        thread.IsBackground = true;
-                        thread.Start();
-                    }
-                }
-            }
             TaskCompletionSource<T> tcs = new TaskCompletionSource<T>();
-            queue.Add(delegate
+            Job job = new Job();
+            job.Run = delegate
             {
-                try { tcs.SetResult(fn()); }
-                catch (Exception e) { tcs.SetException(e); }
-            });
+                try { tcs.TrySetResult(fn()); }
+                catch (Exception e) { tcs.TrySetException(e); }
+            };
+            job.Fail = delegate { tcs.TrySetException(new TimeoutException("the shell didn't answer")); };
+            lock (gate)
+            {
+                if (current == null) current = Start();
+                current.Queue.Add(job);
+            }
             return tcs.Task;
+        }
+
+        static Worker Start()
+        {
+            Worker w = new Worker();
+            Thread t = new Thread(delegate ()
+            {
+                foreach (Job j in w.Queue.GetConsumingEnumerable())
+                {
+                    w.Since = Environment.TickCount;
+                    w.Busy = j;
+                    j.Run();
+                    w.Busy = null;
+                }
+            });
+            t.SetApartmentState(ApartmentState.STA);
+            t.IsBackground = true;
+            t.Start();
+            if (watch == null) watch = new Timer(Check, null, 2000, 2000);
+            return w;
+        }
+
+        static void Check(object state)
+        {
+            Job stuck;
+            lock (gate)
+            {
+                Worker w = current;
+                if (w == null) return;
+                stuck = w.Busy;
+                if (stuck == null || unchecked(Environment.TickCount - w.Since) < StuckMs) return;
+                current = Start();
+                w.Queue.CompleteAdding();
+                Job next;
+                while (w.Queue.TryTake(out next)) current.Queue.Add(next);
+            }
+            stuck.Fail();
+            Program.Log("shell: a call took over " + StuckMs / 1000 + " s; the rest go on without it");
         }
     }
 

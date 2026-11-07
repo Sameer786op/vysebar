@@ -1,5 +1,5 @@
 // CPU, memory, network speed, drives, volume, radios and the other system feeds.
-import { existsSync, statfsSync } from "node:fs";
+import { statfs } from "node:fs/promises";
 import { cpus, freemem, totalmem } from "node:os";
 import { host } from "../host";
 import { defineTopic, poller, publish } from "../topics";
@@ -25,20 +25,39 @@ const cpuHistory: number[] = [];
 const netHistory: { rx: number; tx: number }[] = [];
 let lastNet: { rx: number; tx: number; at: number } | null = null;
 
-export function drives(): { letter: string; total: number; free: number }[] {
-  const out: { letter: string; total: number; free: number }[] = [];
-  for (const L of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
-    const root = `${L}:\\`;
-    if (!existsSync(root)) continue;
-    try {
-      const s = statfsSync(root);
-      const total = s.blocks * s.bsize;
-      if (total > 0) out.push({ letter: L, total, free: s.bavail * s.bsize });
-    } catch {
-      /* not ready (an empty card reader) */
-    }
-  }
-  return out;
+// a drive that takes a long time to answer (a mapped network drive whose server is gone, a disc
+// spinning up) is left out for a few minutes instead of being asked again and again
+const slowDrives = new Map<string, number>();
+// a question still out isn't asked again: each one holds one of the few threads Node does all
+// file work on, and enough of them stuck would hold up every file VyseBar reads
+const asking = new Set<string>();
+
+/** each drive's size and free space, asked of Windows off the main thread */
+export async function drives(): Promise<{ letter: string; total: number; free: number }[]> {
+  const now = Date.now();
+  const letters = [..."CDEFGHIJKLMNOPQRSTUVWXYZ"].filter((L) => (slowDrives.get(L) ?? 0) <= now && !asking.has(L));
+  const found = await Promise.all(
+    letters.map(async (L) => {
+      let timer: NodeJS.Timeout | undefined;
+      const late = new Promise<"late">((r) => (timer = setTimeout(() => r("late"), 3000)));
+      asking.add(L);
+      const ask = statfs(`${L}:\\`).finally(() => asking.delete(L));
+      try {
+        const s = await Promise.race([ask, late]);
+        if (s === "late") {
+          slowDrives.set(L, Date.now() + 5 * 60_000);
+          return null;
+        }
+        const total = s.blocks * s.bsize;
+        return total > 0 ? { letter: L, total, free: s.bavail * s.bsize } : null;
+      } catch {
+        return null; // no such drive, or not ready (an empty card reader)
+      } finally {
+        clearTimeout(timer);
+      }
+    }),
+  );
+  return found.filter((d): d is { letter: string; total: number; free: number } => !!d);
 }
 
 export function initSystemTopics(): void {
@@ -74,7 +93,7 @@ export function initSystemTopics(): void {
     }, 1000),
   );
 
-  defineTopic("storage", poller(() => ({ drives: drives() }), 60_000));
+  defineTopic("storage", poller(async () => ({ drives: await drives() }), 60_000));
   defineTopic("volume", poller(() => host.try("volume"), 1500));
   defineTopic("radios", poller(() => host.try("radios"), 5000));
   defineTopic("mic", poller(() => host.try("micState"), 2000));
@@ -88,7 +107,10 @@ export function initSystemTopics(): void {
   // Now Playing arrives as events; the source app's icon and name come along
   let media: MediaState | null = null;
   const appInfo = new Map<string, { name: string; icon?: string }>();
+  // the first time an app plays, its icon takes a moment; a newer event that came meanwhile wins
+  let mediaSeq = 0;
   const pushMedia = async (m: MediaState | null) => {
+    const seq = ++mediaSeq;
     if (m && m.app) {
       let info = appInfo.get(m.app);
       if (!info) {
@@ -100,6 +122,7 @@ export function initSystemTopics(): void {
       }
       m = { ...m, appName: info.name, appIcon: info.icon };
     }
+    if (seq !== mediaSeq) return;
     media = m;
     publish("media", media);
   };

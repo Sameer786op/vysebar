@@ -5,15 +5,32 @@ import { host } from "../host";
 import { settings } from "../store";
 import { defineTopic, poller, refreshTopic } from "../topics";
 import type { CalEvent, City } from "@shared/types";
+import { parseIcs } from "./ics";
+
+/**
+ * Every request gives up after a while: one that hangs (a half-open connection after the PC
+ * wakes, a server that never answers) would otherwise hold its feed still until VyseBar restarts.
+ * `node` uses Node's own fetch instead of Chromium's (it keeps a hand-set Cookie header).
+ */
+export async function request(url: string, init: RequestInit = {}, ms = 20_000, node = false): Promise<Response> {
+  const limit = AbortSignal.timeout(ms);
+  const signal = init.signal ? AbortSignal.any([init.signal, limit]) : limit;
+  try {
+    return await (node ? fetch : net.fetch)(url, { ...init, signal });
+  } catch (e) {
+    if (limit.aborted) throw new Error("timed out");
+    throw e;
+  }
+}
 
 export async function getJson<T = unknown>(url: string, init?: RequestInit): Promise<T> {
-  const res = await net.fetch(url, { ...init, headers: { "User-Agent": "VyseBar", ...(init?.headers ?? {}) } });
+  const res = await request(url, { ...init, headers: { "User-Agent": "VyseBar", ...(init?.headers ?? {}) } });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
 }
 
 async function getText(url: string): Promise<string> {
-  const res = await net.fetch(url, { headers: { "User-Agent": "VyseBar" } });
+  const res = await request(url, { headers: { "User-Agent": "VyseBar" } });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res.text();
 }
@@ -264,85 +281,6 @@ export async function stripe() {
 }
 
 // ---------- calendars: Google, Outlook and iCloud all publish an ICS address ----------
-
-function icsDate(v: string): { t: number; allDay: boolean } {
-  const m = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?/.exec(v);
-  if (!m) return { t: NaN, allDay: false };
-  const [, y, mo, d, h, mi, s, z] = m;
-  if (h === undefined) return { t: new Date(+y, +mo - 1, +d).getTime(), allDay: true };
-  return { t: z ? Date.UTC(+y, +mo - 1, +d, +h, +mi, +s) : new Date(+y, +mo - 1, +d, +h, +mi, +s).getTime(), allDay: false };
-}
-
-export function parseIcs(text: string, source: string, color: string): CalEvent[] {
-  const lines = text.replace(/\r?\n[ \t]/g, "").split(/\r?\n/);
-  const out: CalEvent[] = [];
-  const horizonStart = Date.now() - 31 * 86400_000;
-  const horizonEnd = Date.now() + 62 * 86400_000;
-  let ev: Record<string, string> | null = null;
-  for (const line of lines) {
-    if (line === "BEGIN:VEVENT") ev = {};
-    else if (line === "END:VEVENT" && ev) {
-      const start = icsDate(ev.DTSTART ?? "");
-      const end = ev.DTEND ? icsDate(ev.DTEND) : { t: start.t + (start.allDay ? 86400_000 : 3600_000), allDay: start.allDay };
-      if (!isNaN(start.t)) {
-        const base: CalEvent = {
-          id: (ev.UID ?? Math.random().toString(36)) + "@" + start.t,
-          title: (ev.SUMMARY ?? "Event").replace(/\\,/g, ",").replace(/\\n/g, " ").replace(/\\;/g, ";"),
-          start: start.t,
-          end: end.t,
-          allDay: start.allDay,
-          location: ev.LOCATION?.replace(/\\,/g, ","),
-          source,
-          color,
-        };
-        const rule = ev.RRULE;
-        if (rule) {
-          // daily and weekly repeats cover most meetings; others show their first date
-          const freq = /FREQ=(\w+)/.exec(rule)?.[1];
-          const interval = Number(/INTERVAL=(\d+)/.exec(rule)?.[1] ?? 1);
-          const until = /UNTIL=(\w+)/.exec(rule)?.[1];
-          const count = Number(/COUNT=(\d+)/.exec(rule)?.[1] ?? 500);
-          const byDay = /BYDAY=([\w,]+)/.exec(rule)?.[1]?.split(",");
-          const step = freq === "DAILY" ? 86400_000 : freq === "WEEKLY" ? 7 * 86400_000 : 0;
-          const untilT = until ? icsDate(until).t : Infinity;
-          const days = ["SU", "MO", "TU", "WE", "TH", "FR", "SA"];
-          if (step) {
-            let n = 0;
-            for (let t = base.start; t <= Math.min(untilT, horizonEnd) && n < count; t += step * interval) {
-              const offsets = freq === "WEEKLY" && byDay ? byDay.map((d) => (days.indexOf(d.slice(-2)) - new Date(base.start).getDay() + 7) % 7) : [0];
-              for (const off of offsets) {
-                const s = t + off * 86400_000;
-                n++;
-                if (s >= horizonStart && s <= horizonEnd) out.push({ ...base, id: base.id + ":" + s, start: s, end: s + (base.end - base.start) });
-              }
-            }
-            continue;
-          }
-          if (freq === "YEARLY" || freq === "MONTHLY") {
-            for (let i = 0; i < 40; i++) {
-              const d = new Date(base.start);
-              if (freq === "YEARLY") d.setFullYear(d.getFullYear() + i * interval);
-              else d.setMonth(d.getMonth() + i * interval);
-              const s = d.getTime();
-              if (s > Math.min(untilT, horizonEnd)) break;
-              if (s >= horizonStart) out.push({ ...base, id: base.id + ":" + s, start: s, end: s + (base.end - base.start) });
-            }
-            continue;
-          }
-        }
-        if (base.end >= horizonStart && base.start <= horizonEnd) out.push(base);
-      }
-      ev = null;
-    } else if (ev) {
-      const i = line.indexOf(":");
-      if (i > 0) {
-        const key = line.slice(0, i).split(";")[0];
-        if (!(key in ev)) ev[key] = line.slice(i + 1);
-      }
-    }
-  }
-  return out;
-}
 
 async function calendars() {
   const all: CalEvent[] = [];

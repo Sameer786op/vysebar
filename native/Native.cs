@@ -171,6 +171,8 @@ namespace VyseHost
         [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr h);
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
         [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr h, int cmd);
+        [DllImport("user32.dll")] public static extern bool IsHungAppWindow(IntPtr h);
+        [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
         [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, string l, uint flags, uint timeout, out IntPtr result);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string cls, string title);

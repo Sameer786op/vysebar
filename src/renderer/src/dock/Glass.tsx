@@ -187,8 +187,13 @@ export function Glass({ mode, info, light, live, onFail }: { mode: GlassMode; in
       kick(2);
     };
 
+    // asked once at a time: every frame drawn before the picture lands would otherwise ask the
+    // main process to decode the whole wallpaper again; a failed try waits a while
+    let wallpaperAt = -Infinity;
     const useWallpaper = async () => {
-      const wp = await window.vyse.invoke<{ url: string; crop: Crop } | null>("dock:wallpaperRegion");
+      if (performance.now() - wallpaperAt < 15_000) return;
+      wallpaperAt = performance.now();
+      const wp = await window.vyse.invoke<{ url: string; crop: Crop } | null>("dock:wallpaperRegion").catch(() => null);
       if (!wp || stopped) return;
       const img = new Image();
       img.onload = () => !stopped && upload(wp.crop, 0, img);

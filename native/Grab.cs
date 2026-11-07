@@ -75,9 +75,7 @@ static class Grab
         if (w <= 0 || h <= 0 || ow <= 0 || oh <= 0 || ow > 8192 || oh > 8192 || w > 16384 || h > 16384) return null;
         if (MagUsable())
         {
-            byte[] rgba = null;
-            try { rgba = (byte[])magUi.Invoke(new Func<byte[]>(delegate { return MagStrip(x, y, w, h, ow, oh); })); }
-            catch { rgba = null; }
+            byte[] rgba = OnMag(delegate { return MagStrip(x, y, w, h, ow, oh); }, 3000);
             if (rgba != null) return new Dictionary<string, object> { { "w", ow }, { "h", oh }, { "data", Convert.ToBase64String(rgba) } };
             // a miss now and then is fine; a broken magnifier hands over to GDI below
             if (!magBroken) return null;
@@ -137,8 +135,7 @@ static class Grab
         if (allow && MagUsable())
         {
             // one tiny read proves the magnifier answers on this PC
-            try { ok = (byte[])magUi.Invoke(new Func<byte[]>(delegate { return MagStrip(0, 0, 16, 4, 4, 1); })) != null; }
-            catch { ok = false; }
+            ok = OnMag(delegate { return MagStrip(0, 0, 16, 4, 4, 1); }, 5000) != null;
             if (!ok) Broke("the first read came back empty");
         }
         return new Dictionary<string, object> { { "excludes", ok } };
@@ -284,6 +281,36 @@ static class Grab
             Broke(e.GetType().Name + ": " + e.Message);
             return null;
         }
+    }
+
+    // a read on the magnifier's thread. One that doesn't come back (a graphics driver stuck in
+    // it) leaves its caller without a picture after a while instead of waiting for ever, and two
+    // of those in a row hand the reads over to GDI
+    static int stalls;
+
+    static byte[] OnMag(Func<byte[]> fn, int ms)
+    {
+        Control ui = magUi;
+        if (ui == null) return null;
+        byte[] result = null;
+        IAsyncResult r;
+        try
+        {
+            r = ui.BeginInvoke(new Action(delegate
+            {
+                try { result = fn(); }
+                catch { result = null; }
+            }));
+        }
+        catch { return null; }
+        if (!r.AsyncWaitHandle.WaitOne(ms))
+        {
+            if (Interlocked.Increment(ref stalls) >= 2) Broke("it stopped answering");
+            return null;
+        }
+        Interlocked.Exchange(ref stalls, 0);
+        try { ui.EndInvoke(r); } catch { }
+        return result;
     }
 
     // a few misses in a row mean the magnifier doesn't answer on this PC

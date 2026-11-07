@@ -1,10 +1,13 @@
 // Pinned apps and open windows, grouped one icon per app the way the taskbar does.
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, extname, join } from "node:path";
+import { existsSync, readdirSync, readFileSync, type Stats } from "node:fs";
+import { stat } from "node:fs/promises";
+import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { app, shell } from "electron";
 import type { AppItem, Pin, WinInfo } from "@shared/types";
+import { writeFileAtomic } from "./files";
 import { host } from "./host";
+import { log } from "./log";
 import { settings } from "./store";
 import { defineTopic, publish } from "./topics";
 
@@ -22,13 +25,29 @@ try {
 } catch {
   /* no cache yet */
 }
+// icons of every download and recent file land here too: the ones not used for longest go first
+const ICON_LIMIT = 600;
 let iconSaveTimer: NodeJS.Timeout | null = null;
 function saveIcons(): void {
   if (iconSaveTimer) return;
   iconSaveTimer = setTimeout(() => {
     iconSaveTimer = null;
-    writeFileSync(iconFile, JSON.stringify(Object.fromEntries(iconCache)));
+    for (const key of iconCache.keys()) {
+      if (iconCache.size <= ICON_LIMIT) break;
+      iconCache.delete(key);
+    }
+    writeFileAtomic(iconFile, JSON.stringify(Object.fromEntries(iconCache)));
   }, 2000);
+}
+
+/** a cached icon, moved to the back of the line (the cache drops from the front) */
+function cachedIcon(key: string): string | undefined {
+  const hit = iconCache.get(key);
+  if (hit) {
+    iconCache.delete(key);
+    iconCache.set(key, hit);
+  }
+  return hit;
 }
 
 // Start lists Win32 apps by a known-folder GUID path; this turns those back into real paths
@@ -93,7 +112,7 @@ export async function getIcon(sources: string[] | string | null, size = 64): Pro
   const list = Array.isArray(sources) ? sources : sources ? [sources] : [];
   for (const source of list) {
     const key = `${size}|${source.toLowerCase()}`;
-    const hit = iconCache.get(key);
+    const hit = cachedIcon(key);
     if (hit) return hit;
     const icon = await host.try<string | null>("icon", { path: source, size });
     if (icon) {
@@ -116,16 +135,52 @@ export async function getIcon(sources: string[] | string | null, size = 64): Pro
   return undefined;
 }
 
-async function nameFor(w: WinInfo): Promise<string> {
+// The dock's list never waits on the helper: an icon or a name that isn't known yet is looked
+// up on the side and the list goes out again once it is. A slow lookup (a file on a sleeping
+// drive, a helper that is restarting) used to hold back every update of the open windows.
+const iconPending = new Set<string>();
+const iconMissed = new Map<string, number>();
+
+function iconNow(sources: string[], size = 64): string | undefined {
+  for (const source of sources) {
+    const hit = cachedIcon(`${size}|${source.toLowerCase()}`);
+    if (hit) return hit;
+  }
+  const key = `${size}|${sources.join("|").toLowerCase()}`;
+  // one that couldn't be had is asked for again after a while, not on every update
+  if (!sources.length || iconPending.has(key) || Date.now() - (iconMissed.get(key) ?? 0) < 5 * 60_000) return undefined;
+  iconPending.add(key);
+  void getIcon(sources, size)
+    .then((icon) => {
+      if (icon) void publishApps();
+      else iconMissed.set(key, Date.now());
+    })
+    .finally(() => iconPending.delete(key));
+  return undefined;
+}
+
+const namePending = new Set<string>();
+
+function nameNow(w: WinInfo): string {
   const key = groupKey(w);
   const hit = nameCache.get(key);
   if (hit) return hit;
   let name: string | null = null;
   if (w.aumid) name = startApps.find((a) => norm(a.id) === norm(w.aumid))?.name ?? null;
+  if (!name && w.exe) name = startApps.find((a) => norm(resolveAumidPath(a.id)) === norm(w.exe))?.name ?? null;
   if (!name && w.exe) {
-    name = startApps.find((a) => norm(resolveAumidPath(a.id)) === norm(w.exe))?.name ?? null;
-    if (!name) name = await host.try<string | null>("exeName", { path: w.exe });
-    if (!name) name = basename(w.exe, extname(w.exe));
+    const exe = w.exe;
+    if (!namePending.has(key)) {
+      namePending.add(key);
+      void host
+        .try<string | null>("exeName", { path: exe })
+        .then((n) => {
+          nameCache.set(key, n || basename(exe, extname(exe)));
+          void publishApps();
+        })
+        .finally(() => namePending.delete(key));
+    }
+    return basename(exe, extname(exe));
   }
   name = name || w.title || "App";
   nameCache.set(key, name);
@@ -141,7 +196,7 @@ export async function publishApps(): Promise<void> {
   }
   computing = true;
   try {
-    publish("apps", await computeApps());
+    publish("apps", computeApps());
   } finally {
     computing = false;
     if (again) {
@@ -151,14 +206,14 @@ export async function publishApps(): Promise<void> {
   }
 }
 
-async function computeApps(): Promise<AppItem[]> {
+function computeApps(): AppItem[] {
   const pins = settings.value.pins;
   const items: AppItem[] = [];
   const claimed = new Set<number>();
 
   for (const pin of pins) {
     if (pin.group) {
-      const icons = await Promise.all(pin.group.items.slice(0, 4).map((p) => getIcon(iconSource(p), 32)));
+      const icons = pin.group.items.slice(0, 4).map((p) => iconNow(iconSource(p), 32));
       items.push({
         key: "group:" + pin.id,
         name: pin.group.name,
@@ -177,7 +232,7 @@ async function computeApps(): Promise<AppItem[]> {
     items.push({
       key: "pin:" + pin.id,
       name: pin.name,
-      icon: await getIcon(iconSource(pin)),
+      icon: iconNow(iconSource(pin)),
       pinned: true,
       pin,
       windows: wins,
@@ -200,8 +255,8 @@ async function computeApps(): Promise<AppItem[]> {
     const w = wins[0];
     items.push({
       key: "run:" + key,
-      name: await nameFor(w),
-      icon: await getIcon(iconSource({ aumid: w.aumid, exe: w.exe })),
+      name: nameNow(w),
+      icon: iconNow(iconSource({ aumid: w.aumid, exe: w.exe })),
       pinned: false,
       windows: wins,
       active: wins.some((x) => x.active),
@@ -225,6 +280,7 @@ export function initApps(): void {
     void publishApps();
   });
   host.on("ready", () => {
+    iconMissed.clear();
     // Start's app list tells which app ID an .exe has, for recent files in app menus; read it
     // once things have settled
     setTimeout(() => void host.try("jumpWarm"), 8000);
@@ -237,23 +293,31 @@ export function initApps(): void {
     if (v.pins !== prev.pins) void publishApps();
   });
   void loadStartApps();
-  markFolderPins();
+  void markFolderPins();
+}
+
+/**
+ * a file's details, or null when it isn't there or doesn't answer within `ms`. Never on the main
+ * thread: a folder on a network drive that is offline takes long to say so, and the dock (and,
+ * through its mouse hook, the cursor) would wait with it
+ */
+function statSoon(path: string, ms = 3000): Promise<Stats | null> {
+  return Promise.race([stat(path).catch(() => null), new Promise<null>((r) => setTimeout(() => r(null), ms))]);
 }
 
 // folders pinned before stacks existed get marked once, so they open as stacks too
-function markFolderPins(): void {
-  let changed = false;
-  const pins = settings.value.pins.map((p) => {
-    if (p.folder || p.group || p.aumid || !p.path || p.exe) return p;
-    try {
-      if (!statSync(p.path).isDirectory()) return p;
-    } catch {
-      return p;
-    }
-    changed = true;
-    return { ...p, folder: true };
-  });
-  if (changed) settings.set({ pins });
+async function markFolderPins(): Promise<void> {
+  const before = settings.value.pins;
+  const folders = new Set<string>();
+  await Promise.all(
+    before.map(async (p) => {
+      if (p.folder || p.group || p.aumid || !p.path || p.exe) return;
+      if ((await statSoon(p.path))?.isDirectory()) folders.add(p.id);
+    }),
+  );
+  // pins changed meanwhile (one dragged in): marked next start
+  if (!folders.size || settings.value.pins !== before) return;
+  settings.set({ pins: before.map((p) => (folders.has(p.id) ? { ...p, folder: true } : p)) });
 }
 
 export async function loadStartApps(): Promise<{ name: string; id: string }[]> {
@@ -274,15 +338,12 @@ const uid = () => Math.random().toString(36).slice(2, 10);
 export async function pinFromPath(path: string): Promise<Pin> {
   const ext = extname(path).toLowerCase();
   const pin: Pin = { id: uid(), name: basename(path, ext), path };
-  // a folder opens as a stack of what's inside, not straight into Explorer
-  try {
-    if (statSync(path).isDirectory()) {
-      pin.name = basename(path) || path;
-      pin.folder = true;
-      return pin;
-    }
-  } catch {
-    /* not there (yet): treated as a file */
+  // a folder opens as a stack of what's inside, not straight into Explorer (one that isn't there,
+  // or doesn't answer, is treated as a file)
+  if ((await statSoon(path))?.isDirectory()) {
+    pin.name = basename(path) || path;
+    pin.folder = true;
+    return pin;
   }
   if (ext === ".lnk") {
     try {
@@ -324,29 +385,51 @@ export async function importTaskbarPins(): Promise<Pin[]> {
   return pins;
 }
 
+/**
+ * starts a program. One that has to run as administrator can't be started directly (Windows
+ * answers EACCES and nothing opens): then the helper opens it the way Explorer does, which asks
+ * for permission. A failure never goes unhandled.
+ */
+export function startProgram(file: string, args: string[] = [], rawArgs?: string): void {
+  const fallback = (why: string) => {
+    log(`starting a program failed (${why}): opening it the Windows way`);
+    if (!host.ready) {
+      if (!args.length) void shell.openPath(file);
+      return;
+    }
+    const line = rawArgs ?? args.map((a) => (!a || /[\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
+    // Windows asks for permission first and the helper waits for the answer: it gets time, so a
+    // slow answer isn't taken for a failure (and the program asked for a second time)
+    void host
+      .call("open", { path: file, args: line, cwd: isAbsolute(file) ? dirname(file) : "" }, 120_000)
+      .catch((err) => log(`opening it failed too (${(err as Error).message})`));
+  };
+  try {
+    const child = spawn(file, args, { detached: true, stdio: "ignore" });
+    child.on("error", (err) => fallback((err as NodeJS.ErrnoException).code ?? "error"));
+    child.unref();
+  } catch (err) {
+    fallback((err as NodeJS.ErrnoException).code ?? "error");
+  }
+}
+
 export function launchPin(pin: Pin): void {
   if (pin.aumid && !pin.path) {
-    spawn("explorer.exe", ["shell:AppsFolder\\" + pin.aumid], { detached: true, stdio: "ignore" }).unref();
+    startProgram("explorer.exe", ["shell:AppsFolder\\" + pin.aumid]);
     return;
   }
   if (!pin.path) return;
   if (pin.args && extname(pin.path).toLowerCase() === ".exe") {
-    spawn(pin.path, pin.args.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((a) => a.replace(/^"|"$/g, "")) ?? [], {
-      detached: true,
-      stdio: "ignore",
-    }).unref();
+    startProgram(pin.path, pin.args.match(/(?:[^\s"]+|"[^"]*")+/g)?.map((a) => a.replace(/^"|"$/g, "")) ?? [], pin.args);
     return;
   }
-  void shell.openPath(pin.path);
+  void shell.openPath(pin.path).then((err) => err && log("opening a pin failed"));
 }
 
 /** opens a new window of a running app that has no pin */
 export function launchWindowApp(w: WinInfo): void {
-  if (w.aumid && w.aumid.includes("!")) {
-    spawn("explorer.exe", ["shell:AppsFolder\\" + w.aumid], { detached: true, stdio: "ignore" }).unref();
-  } else if (w.exe) {
-    spawn(w.exe, [], { detached: true, stdio: "ignore" }).unref();
-  }
+  if (w.aumid && w.aumid.includes("!")) startProgram("explorer.exe", ["shell:AppsFolder\\" + w.aumid]);
+  else if (w.exe) startProgram(w.exe);
 }
 
 // ---------- window previews ----------

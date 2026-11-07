@@ -223,8 +223,13 @@ namespace VyseHost
         {
             if (m == WM_TIMER)
             {
-                if (w == TICK) Tick();
-                else if (w == EMIT) { KillTimer(me, EMIT); Program.Send("tray", List()); }
+                // an error must not escape into Windows from here: it would end the helper
+                try
+                {
+                    if (w == TICK) Tick();
+                    else if (w == EMIT) { KillTimer(me, EMIT); Program.Send("tray", List()); }
+                }
+                catch (Exception e) { Program.LogError("tray", e); }
                 return IntPtr.Zero;
             }
             if (m == taskbarCreated)

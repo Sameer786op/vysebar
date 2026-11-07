@@ -2,7 +2,8 @@
 // edge, tall enough for the cards that open out of the dock. Only the dock and open cards
 // take the mouse; everywhere else clicks fall through to the windows behind.
 import { join } from "node:path";
-import { readFileSync, existsSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import { app, BrowserWindow, ipcMain, nativeImage, powerMonitor, screen, type Display } from "electron";
 import type { DockInfo, WinInfo } from "@shared/types";
 import { host } from "./host";
@@ -27,6 +28,8 @@ interface Dock {
 
 const docks = new Map<number, Dock>();
 let lastExternal = 0;
+let quitting = false;
+app.on("before-quit", () => (quitting = true));
 
 export function loadPage(win: BrowserWindow, route: string): void {
   if (process.env.ELECTRON_RENDERER_URL) void win.loadURL(`${process.env.ELECTRON_RENDERER_URL}#${route}`);
@@ -161,8 +164,16 @@ function createDock(d: Display): Dock {
   // the glass reads the screen behind the dock; the dock must not see itself in it
   win.setContentProtection(hideFromCapture());
   loadPage(win, `dock?display=${d.id}`);
-  win.once("ready-to-show", () => win.showInactive());
+  // a game or video that already has this screen keeps it
+  win.once("ready-to-show", () => !dock.fullscreen && win.showInactive());
   const dock: Dock = { win, display: d, fullscreen: false, wants: false, plate: null, overPlate: false, desktop: false };
+  win.on("unresponsive", () => log("the dock isn't taking input"));
+  win.on("responsive", () => log("the dock is taking input again"));
+  // Alt+F4 while a card has the keyboard would close the dock for good; like the taskbar, it
+  // only goes away when VyseBar quits
+  win.on("close", (e) => {
+    if (!quitting) e.preventDefault();
+  });
   // a dock page that crashed (a GPU driver reset, the PC waking up) comes back by itself
   win.webContents.on("render-process-gone", (_e, why) => {
     if (why.reason === "clean-exit") return;
@@ -233,6 +244,54 @@ export function layoutDocks(): void {
     dock.win.setContentProtection(hideFromCapture());
     reserve(dock);
   }
+  // a dock that moved to another screen, or a new one, follows that screen's fullscreen state
+  applyFullscreen();
+}
+
+// a fullscreen game or video gets the whole screen; the dock stops drawing under it
+let fullRect: Electron.Rectangle | null = null;
+function applyFullscreen(): void {
+  const target = fullRect ? screen.getDisplayMatching(fullRect) : null;
+  for (const dock of docks.values()) {
+    if (dock.win.isDestroyed()) continue;
+    const full = !!target && target.id === dock.display.id;
+    if (full === dock.fullscreen) continue;
+    dock.fullscreen = full;
+    if (full) {
+      dock.win.hide();
+      // a game or video has the screen: the dock's memory is better off with it
+      trimNow();
+    } else dock.win.showInactive();
+  }
+}
+
+// ---- a dock page that stops answering ----
+// A script stuck in a loop, or a renderer that hung, leaves a dock that is drawn but takes no
+// clicks: nothing on it works, Quit included. Each dock page is asked every few seconds (the
+// preload answers); one that hasn't answered for half a minute is ended, and comes back by itself
+const lastPong = new Map<number, number>();
+function watchPages(): void {
+  ipcMain.on("vyse:pong", (e) => lastPong.set(e.sender.id, Date.now()));
+  let lastTick = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    // the PC slept, or VyseBar's own thread was held up: the pages get a fresh start
+    const skipped = now - lastTick > 20_000;
+    lastTick = now;
+    for (const dock of docks.values()) {
+      if (dock.win.isDestroyed()) continue;
+      const wc = dock.win.webContents;
+      const last = lastPong.get(wc.id);
+      if (skipped || last === undefined || wc.isLoading() || wc.isCrashed()) lastPong.set(wc.id, now);
+      else if (now - last > 30_000) {
+        lastPong.set(wc.id, now);
+        log("the dock page stopped answering for 30 s: reloading it");
+        wc.forcefullyCrashRenderer();
+        continue;
+      }
+      wc.send("vyse:ping");
+    }
+  }, 5000);
 }
 
 let relayoutTimer: NodeJS.Timeout | null = null;
@@ -300,6 +359,8 @@ export function initDocks(): void {
   layoutDocks();
   // the helper is usually up by now, so its "ready" has already gone by
   applyTaskbar();
+  if (host.ready) askGrabMode();
+  watchPages();
   screen.on("display-added", relayoutSoon);
   screen.on("display-removed", relayoutSoon);
   screen.on("display-metrics-changed", relayoutSoon);
@@ -369,7 +430,11 @@ export function initDocks(): void {
     askGrabMode();
   });
   // a new helper reads with GDI until it's asked: keep the dock out of captures till then
-  host.on("restarted", () => setGrabSkipsDock(false));
+  host.on("restarted", () => {
+    setGrabSkipsDock(false);
+    fullRect = null;
+    applyFullscreen();
+  });
   // the helper gave up on the magnifier (it stopped answering)
   host.on("grabMode", (m: { excludes?: boolean }) => setGrabSkipsDock(!!m?.excludes && !magnifierOff()));
   host.on("explorerRestarted", () => {
@@ -400,20 +465,9 @@ export function initDocks(): void {
     startShown = start;
   });
 
-  // a fullscreen game or video gets the whole screen; the dock stops drawing under it
   host.on("fullscreen", (rect: { x: number; y: number; width: number; height: number } | null) => {
-    const dip = rect ? screen.screenToDipRect(null, rect) : null;
-    const target = dip ? screen.getDisplayMatching(dip) : null;
-    for (const dock of docks.values()) {
-      const full = !!target && target.id === dock.display.id;
-      if (full === dock.fullscreen) continue;
-      dock.fullscreen = full;
-      if (full) {
-        dock.win.hide();
-        // a game or video has the screen: the dock's memory is better off with it
-        trimNow();
-      } else dock.win.showInactive();
-    }
+    fullRect = rect ? screen.screenToDipRect(null, rect) : null;
+    applyFullscreen();
   });
 
   // follow: holding the pointer against the dock's edge of another screen brings the dock there
@@ -538,12 +592,10 @@ export function initDocks(): void {
   ipcMain.on("dock:grabRelease", () => void host.try("grabRelease"));
 
   // lite glass: the wallpaper as Windows fills it onto the display, cut to this dock's window
-  ipcMain.handle("dock:wallpaperRegion", (e) => {
+  ipcMain.handle("dock:wallpaperRegion", async (e) => {
     const dock = dockOf(e);
-    const transcoded = join(process.env.APPDATA ?? "", "Microsoft", "Windows", "Themes", "TranscodedWallpaper");
-    if (!dock || !existsSync(transcoded)) return null;
-    const img = nativeImage.createFromBuffer(readFileSync(transcoded));
-    if (img.isEmpty()) return null;
+    const img = await wallpaperImage();
+    if (!dock || !img || dock.win.isDestroyed()) return null;
     const d = dock.display.bounds;
     const wb = dock.win.getBounds();
     const top = Math.max(0, wb.y - d.y);
@@ -557,11 +609,25 @@ export function initDocks(): void {
     return { url: `data:image/jpeg;base64,${part.toJPEG(85).toString("base64")}`, crop: { x: 0, y: top, w: d.width, h: wb.height } };
   });
 
-  ipcMain.handle("dock:wallpaper", () => {
-    const transcoded = join(process.env.APPDATA ?? "", "Microsoft", "Windows", "Themes", "TranscodedWallpaper");
-    if (!existsSync(transcoded)) return null;
-    const img = nativeImage.createFromBuffer(readFileSync(transcoded));
-    if (img.isEmpty()) return null;
-    return img.resize({ width: 1920 }).toDataURL();
+  ipcMain.handle("dock:wallpaper", async () => {
+    const img = await wallpaperImage();
+    return img ? `data:image/jpeg;base64,${img.resize({ width: 1920 }).toJPEG(85).toString("base64")}` : null;
   });
+}
+
+// the wallpaper as Windows keeps it, read off the main thread and decoded once per change
+let wallpaper: { key: string; img: Electron.NativeImage } | null = null;
+async function wallpaperImage(): Promise<Electron.NativeImage | null> {
+  const file = join(process.env.APPDATA ?? "", "Microsoft", "Windows", "Themes", "TranscodedWallpaper");
+  try {
+    const st = await stat(file);
+    const key = `${st.size}:${st.mtimeMs}`;
+    if (wallpaper?.key === key) return wallpaper.img;
+    const img = nativeImage.createFromBuffer(await readFile(file));
+    if (img.isEmpty()) return null;
+    wallpaper = { key, img };
+    return img;
+  } catch {
+    return null;
+  }
 }

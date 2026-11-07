@@ -12,6 +12,20 @@ namespace VyseHost
             switch (cmd)
             {
                 case "ping": return "pong";
+                // the window thread answering, for main's check that the helper isn't stuck
+                case "uiPing": return Program.OnUiSync(delegate { return (object)"pong"; }, 4000);
+                // VyseBar's own command line, so a VyseBar that has stopped answering can be started again
+                case "watchdog": return Watchdog.Arm(Program.Str(a, "exe"), Program.Str(a, "args"), Program.Str(a, "cwd"), (int)Program.Long(a, "seconds", 45));
+                // opens a program the way Explorer does: one that must run as administrator asks for it
+                case "open":
+                    {
+                        ProcessStartInfo si = new ProcessStartInfo(Program.Str(a, "path"), Program.Str(a, "args") ?? "");
+                        si.UseShellExecute = true;
+                        string dir = Program.Str(a, "cwd");
+                        if (!string.IsNullOrEmpty(dir)) si.WorkingDirectory = dir;
+                        Process.Start(si);
+                        return true;
+                    }
 
                 // windows
                 case "windows": return Program.OnUiSync(delegate { return (object)WindowTracker.List(); });
@@ -102,7 +116,9 @@ namespace VyseHost
                     }
                 case "displayMode": Native.Keys(Native.VK_LWIN, (ushort)0x50); return true;
                 case "setWallpaper": return Extras.SetWallpaper(Program.Str(a, "path"));
-                case "quickAccess": return Program.OnUiSync(delegate { return Extras.QuickAccess(); });
+                // Shell.Application wants a single-threaded apartment; the shell's own one, never the
+                // window thread (a network folder in Quick access can take a long time to answer)
+                case "quickAccess": return await Sta.Run(delegate { return Extras.QuickAccess(); });
                 case "lock": return Native.LockWorkStation();
                 case "sleep": return Program.OnUiSync(delegate { return (object)System.Windows.Forms.Application.SetSuspendState(System.Windows.Forms.PowerState.Suspend, false, false); });
 

@@ -4,7 +4,7 @@ import { readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } from "electron";
 import type { Data, Pin, Settings, Toast, WinInfo } from "@shared/types";
-import { getIcon, iconSource, importTaskbarPins, launchPin, launchWindowApp, pinFromPath, pinFromStartApp, startAppList, windowThumbs } from "./apps";
+import { getIcon, iconSource, importTaskbarPins, launchPin, launchWindowApp, pinFromPath, pinFromStartApp, startAppList, startProgram, windowThumbs } from "./apps";
 import { host } from "./host";
 import { data, settings } from "./store";
 import { refreshTopic } from "./topics";
@@ -125,14 +125,16 @@ export function registerIpc(): void {
     const exe = { taskmgr: "taskmgr.exe", explorer: "explorer.exe", settings: "explorer.exe", recycle: "explorer.exe" }[what];
     if (!exe) return;
     const args = what === "settings" ? ["ms-settings:"] : what === "recycle" ? ["shell:RecycleBinFolder"] : [];
-    spawn(exe, args, { detached: true, stdio: "ignore" }).unref();
+    startProgram(exe, args);
   });
 
   ipcMain.handle("power", (_e, what: "lock" | "sleep" | "restart" | "shutdown" | "signout") => {
     if (what === "lock" || what === "sleep") return host.try(what);
     const flag = { restart: "/r", shutdown: "/s", signout: "/l" }[what];
     if (!flag) return;
-    spawn("shutdown.exe", flag === "/l" ? [flag] : [flag, "/t", "0"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    const child = spawn("shutdown.exe", flag === "/l" ? [flag] : [flag, "/t", "0"], { detached: true, stdio: "ignore", windowsHide: true });
+    child.on("error", (err) => log(`couldn't ${what}: ${(err as NodeJS.ErrnoException).code ?? err.message}`));
+    child.unref();
   });
 
   // dragging a file out of a card (a download onto an email, a screenshot into a chat)

@@ -107,6 +107,20 @@ namespace VyseHost
         static IntPtr Hook(int code, IntPtr wParam, IntPtr lParam)
         {
             if (code < 0) return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+            // an error here must never reach Windows (it would end the helper mid-keystroke): the
+            // key just goes on to the app
+            try
+            {
+                IntPtr taken = Take(wParam, lParam);
+                if (taken != IntPtr.Zero) return taken;
+            }
+            catch (Exception e) { Program.LogError("keyboard hook", e); }
+            return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+        }
+
+        /// non-zero: the key is the dock's and goes no further
+        static IntPtr Take(IntPtr wParam, IntPtr lParam)
+        {
             KBDLLHOOKSTRUCT k = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
             int msg = wParam.ToInt32();
             bool down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -169,7 +183,7 @@ namespace VyseHost
                     return new IntPtr(1);
                 }
             }
-            return CallNextHookEx(IntPtr.Zero, code, wParam, lParam);
+            return IntPtr.Zero;
         }
 
         static bool IsNavVk(uint vk) { return (vk >= 0x25 && vk <= 0x28) || vk == 0x09 || vk == 0x0D || vk == 0x20 || vk == 0x1B; }

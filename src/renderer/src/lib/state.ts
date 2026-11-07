@@ -165,17 +165,25 @@ export interface Battery {
 export function useBattery(): Battery | null {
   const [b, setB] = useState<Battery | null>(null);
   useEffect(() => {
-    let mgr: any;
+    // the page has one battery object for every widget: listeners come off it again on unmount,
+    // or each remount leaves four more behind
+    const events = ["levelchange", "chargingchange", "chargingtimechange", "dischargingtimechange"];
+    let mgr: any = null;
     let off = false;
     const read = () =>
-      !off && mgr && setB({ level: mgr.level, charging: mgr.charging, chargingTime: mgr.chargingTime, dischargingTime: mgr.dischargingTime });
-    (navigator as any).getBattery?.().then((m: any) => {
-      mgr = m;
-      read();
-      for (const ev of ["levelchange", "chargingchange", "chargingtimechange", "dischargingtimechange"]) m.addEventListener(ev, read);
-    });
+      mgr && setB({ level: mgr.level, charging: mgr.charging, chargingTime: mgr.chargingTime, dischargingTime: mgr.dischargingTime });
+    (navigator as any)
+      .getBattery?.()
+      .then((m: any) => {
+        if (off) return;
+        mgr = m;
+        read();
+        for (const ev of events) m.addEventListener(ev, read);
+      })
+      .catch(() => undefined);
     return () => {
       off = true;
+      if (mgr) for (const ev of events) mgr.removeEventListener(ev, read);
     };
   }, []);
   return b;

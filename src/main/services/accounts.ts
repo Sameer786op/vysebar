@@ -1,26 +1,27 @@
 // Widgets that read an account with your own key (revenue, analytics, social, Linear,
 // DeepSeek, LeetCode), plus a few more feeds: ChatGPT's Codex limits from its local logs,
 // the wallpaper gallery, temperature and the extra Quick Toggles switches.
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { createWriteStream, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { app, ipcMain, net } from "electron";
+import { app, ipcMain } from "electron";
 import { PROVIDERS, REVENUE_PROVIDERS, isConnected, type ProviderData, type RevenueData, type UsageData, type UsageWindow } from "@shared/accounts";
 import { host } from "../host";
 import { settings } from "../store";
 import { defineTopic, poller, refreshTopic } from "../topics";
-import { getJson, stripe } from "./online";
+import { getJson, request, stripe } from "./online";
 import { initLocalAiTopics } from "./localai";
+import { writeFileAtomic } from "../files";
 
 type Keys = Record<string, string>;
 const day = (t: number) => new Date(t).toISOString().slice(0, 10);
 const isoDaysAgo = (n: number) => new Date(Date.now() - n * 86400_000).toISOString();
 
 async function postJson<T>(url: string, body: unknown, headers: Record<string, string>): Promise<T> {
-  const res = await net.fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "User-Agent": "VyseBar", ...headers }, body: JSON.stringify(body) });
+  const res = await request(url, { method: "POST", headers: { "Content-Type": "application/json", "User-Agent": "VyseBar", ...headers }, body: JSON.stringify(body) });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
 }
@@ -35,7 +36,7 @@ const num = (v: unknown) => (Number.isFinite(Number(v)) ? Number(v) : 0);
 
 /** Node's own fetch: Chromium's drops a Cookie header set by hand */
 async function cookieJson<T>(url: string, headers: Record<string, string>): Promise<T> {
-  const res = await fetch(url, { headers: { "User-Agent": "VyseBar", Accept: "application/json", ...headers } });
+  const res = await request(url, { headers: { "User-Agent": "VyseBar", Accept: "application/json", ...headers } }, 20_000, true);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
 }
@@ -413,7 +414,8 @@ export function remember(id: string, used: number): { t: number; used: number }[
   if (last && last.used === v && now - last.t <= 4 * 60_000) return history[id] ?? list;
   list.push({ t: now, used: v });
   history[id] = list.slice(-400);
-  void writeFile(historyFile, JSON.stringify(history)).catch(() => undefined);
+  // written whole, one at a time: two overlapping writes could leave the file half each
+  writeFileAtomic(historyFile, JSON.stringify(history));
   return history[id];
 }
 
@@ -453,29 +455,46 @@ async function totalRevenue() {
 
 // ---------- ChatGPT: Codex's 5-hour and weekly limits, from its own session logs ----------
 
-function codexUsage() {
+async function codexUsage() {
   const root = join(homedir(), ".codex", "sessions");
   if (!existsSync(root)) return { error: "Codex isn't on this PC" };
-  // the newest session file: sessions/YYYY/MM/DD/rollout-*.jsonl
-  let newest: { file: string; mtime: number } | null = null;
-  const walk = (dir: string, depth: number) => {
-    for (const name of readdirSync(dir)) {
-      const p = join(dir, name);
-      const st = statSync(p);
-      if (st.isDirectory() && depth < 3) walk(p, depth + 1);
-      else if (name.endsWith(".jsonl") && (!newest || st.mtimeMs > newest.mtime)) newest = { file: p, mtime: st.mtimeMs };
+  // sessions/YYYY/MM/DD/rollout-*.jsonl: only the newest few days are looked at, so a long
+  // history isn't walked file by file every minute (and nothing here holds up the dock)
+  const newest = async (dir: string, n: number) =>
+    (await readdir(dir).catch(() => [] as string[]))
+      .filter((d) => /^\d+$/.test(d))
+      .sort()
+      .reverse()
+      .slice(0, n)
+      .map((d) => join(dir, d));
+  const dirs = [root];
+  for (const y of await newest(root, 2)) {
+    for (const m of await newest(y, 2)) {
+      for (const d of await newest(m, 3)) if (dirs.length < 4) dirs.push(d);
     }
-  };
-  walk(root, 0);
-  if (!newest) return { error: "No Codex sessions yet" };
-  const { file, mtime } = newest as { file: string; mtime: number };
+  }
+  let latest: { file: string; mtime: number } | null = null;
+  for (const dir of dirs) {
+    for (const name of await readdir(dir).catch(() => [] as string[])) {
+      if (!name.endsWith(".jsonl")) continue;
+      const p = join(dir, name);
+      const st = await stat(p).catch(() => null);
+      if (st && (!latest || st.mtimeMs > latest.mtime)) latest = { file: p, mtime: st.mtimeMs };
+    }
+  }
+  if (!latest) return { error: "No Codex sessions yet" };
+  const { file, mtime } = latest as { file: string; mtime: number };
   // the limits ride along with token counts near the end of the file
-  const size = statSync(file).size;
-  const len = Math.min(size, 512 * 1024);
-  const buf = Buffer.alloc(len);
-  const fd = openSync(file, "r");
-  readSync(fd, buf, 0, len, size - len);
-  closeSync(fd);
+  const fh = await open(file, "r");
+  let buf: Buffer;
+  try {
+    const size = (await fh.stat()).size;
+    const len = Math.min(size, 512 * 1024);
+    buf = Buffer.alloc(len);
+    await fh.read(buf, 0, len, size - len);
+  } finally {
+    await fh.close();
+  }
   const lines = buf.toString("utf8").split("\n").reverse();
   for (const line of lines) {
     if (!line.includes("rate_limits")) continue;
@@ -511,15 +530,34 @@ async function wallpapers() {
   }));
 }
 
+/** a picture an earlier version saved half-way (it wrote straight to the final name) is fetched again */
+function isWholeJpeg(file: string): boolean {
+  try {
+    const b = readFileSync(file);
+    return b.length > 1024 && b[0] === 0xff && b[1] === 0xd8 && b[b.length - 2] === 0xff && b[b.length - 1] === 0xd9;
+  } catch {
+    return false;
+  }
+}
+
 async function setWallpaper(url: string, id: string) {
   if (!/^https:\/\/www\.bing\.com\//.test(url)) throw new Error("not a gallery picture");
   const dir = join(app.getPath("userData"), "wallpapers");
   mkdirSync(dir, { recursive: true });
   const file = join(dir, `${id.replace(/[^\w-]/g, "").slice(0, 40) || "wallpaper"}.jpg`);
-  if (!existsSync(file)) {
-    const res = await net.fetch(url);
-    if (!res.ok || !res.body) throw new Error(`${res.status}`);
-    await pipeline(Readable.fromWeb(res.body as any), createWriteStream(file));
+  if (!isWholeJpeg(file)) {
+    // downloaded beside its real name and renamed once whole: a download cut short (the PC
+    // going to sleep, the network dropping) never becomes a broken wallpaper
+    const part = `${file}.part`;
+    try {
+      const res = await request(url, {}, 300_000);
+      if (!res.ok || !res.body) throw new Error(`${res.status}`);
+      await pipeline(Readable.fromWeb(res.body as any), createWriteStream(part));
+      renameSync(part, file);
+    } catch (e) {
+      rmSync(part, { force: true });
+      throw e;
+    }
   }
   return host.call("setWallpaper", { path: file });
 }
