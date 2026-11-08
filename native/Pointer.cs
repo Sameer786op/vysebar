@@ -87,6 +87,106 @@ namespace VyseHost
             d["touch"] = GetCursorInfo(ref ci) && (ci.flags & CURSOR_SUPPRESSED) != 0;
             return d;
         }
+
+        [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr h);
+        [DllImport("user32.dll")] static extern IntPtr GetTopWindow(IntPtr h);
+        [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
+        [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+        [DllImport("advapi32.dll")] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+        [DllImport("advapi32.dll")] static extern bool GetTokenInformation(IntPtr token, int cls, out int value, int size, out int returned);
+
+        static string Flags(IntPtr h)
+        {
+            long ex = Native.GetWindowLongPtr(h, Native.GWL_EXSTYLE).ToInt64();
+            List<string> f = new List<string>();
+            if ((ex & WS_EX_TOPMOST) != 0) f.Add("topmost");
+            if ((ex & 0x20) != 0) f.Add("click-through");
+            if ((ex & WS_EX_LAYERED) != 0)
+            {
+                uint key, flags;
+                byte alpha;
+                if (GetLayeredWindowAttributes(h, out key, out alpha, out flags) && (flags & LWA_ALPHA) != 0) f.Add("opacity " + alpha);
+                else f.Add("layered");
+            }
+            if ((ex & 0x08000000) != 0) f.Add("no-activate");
+            if (!IsWindowEnabled(h)) f.Add("DISABLED");
+            return string.Join(",", f.ToArray());
+        }
+
+        static string Who(IntPtr h)
+        {
+            uint pid;
+            Native.GetWindowThreadProcessId(h, out pid);
+            string exe = pid == Program.ParentPid ? "VyseBar" : pid == (uint)System.Diagnostics.Process.GetCurrentProcess().Id ? "VyseHost" : Path.GetFileName(WindowTracker.ExeOf(pid) ?? "?");
+            return WindowTracker.ClassOf(h) + " of " + exe;
+        }
+
+        /// an app running as administrator: Windows keeps its input from apps that aren't
+        static string Elevated(uint pid)
+        {
+            IntPtr p = OpenProcess(0x1000 /* PROCESS_QUERY_LIMITED_INFORMATION */, false, pid);
+            if (p == IntPtr.Zero) return "unknown";
+            try
+            {
+                IntPtr token;
+                if (!OpenProcessToken(p, 0x8 /* TOKEN_QUERY */, out token)) return "unknown";
+                try
+                {
+                    int elevated, n;
+                    return GetTokenInformation(token, 20 /* TokenElevation */, out elevated, 4, out n) ? (elevated != 0 ? "yes" : "no") : "unknown";
+                }
+                finally { CloseHandle(token); }
+            }
+            finally { CloseHandle(p); }
+        }
+
+        /// The dock's own window as Windows has it, for main's log when the dock seems not to take
+        /// the pointer: its styles and place, what is stacked above it at the point (classes and
+        /// program names only, never titles), the app in front and whether it runs elevated, and
+        /// whether a window of the dock's thread holds the mouse. Only reads; sends nothing.
+        public static Dictionary<string, object> DockWin(IntPtr dock, int x, int y)
+        {
+            Dictionary<string, object> d = new Dictionary<string, object>();
+            if (dock == IntPtr.Zero || !Native.IsWindow(dock)) { d["gone"] = true; return d; }
+            RECT r;
+            Native.GetWindowRect(dock, out r);
+            d["rect"] = r.left + "," + r.top + " " + (r.right - r.left) + "x" + (r.bottom - r.top);
+            d["flags"] = Flags(dock);
+            d["visible"] = Native.IsWindowVisible(dock);
+            int cloaked;
+            d["cloaked"] = DwmGetWindowAttribute(dock, 14 /* DWMWA_CLOAKED */, out cloaked, 4) == 0 && cloaked != 0;
+            List<string> above = new List<string>();
+            int count = 0;
+            for (IntPtr h = GetTopWindow(IntPtr.Zero); h != IntPtr.Zero && h != dock && count < 400; h = Native.GetWindow(h, 2 /* GW_HWNDNEXT */), count++)
+            {
+                if (!Native.IsWindowVisible(h)) continue;
+                int c;
+                if (DwmGetWindowAttribute(h, 14, out c, 4) == 0 && c != 0) continue;
+                RECT w;
+                Native.GetWindowRect(h, out w);
+                if (x < w.left || x >= w.right || y < w.top || y >= w.bottom) continue;
+                above.Add(Who(h) + " [" + Flags(h) + "]");
+                if (above.Count >= 6) break;
+            }
+            d["above"] = above;
+            IntPtr fg = Native.GetForegroundWindow();
+            if (fg != IntPtr.Zero)
+            {
+                uint pid;
+                Native.GetWindowThreadProcessId(fg, out pid);
+                d["front"] = Who(fg) + (pid == Program.ParentPid ? "" : ", elevated: " + Elevated(pid));
+            }
+            uint dockPid;
+            uint tid = Native.GetWindowThreadProcessId(dock, out dockPid);
+            GUITHREADINFO gi = new GUITHREADINFO();
+            gi.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+            if (GetGUIThreadInfo(tid, ref gi) && gi.hwndCapture != IntPtr.Zero) d["capture"] = WindowTracker.ClassOf(gi.hwndCapture);
+            GUITHREADINFO fgi = new GUITHREADINFO();
+            fgi.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+            if (GetGUIThreadInfo(0, ref fgi) && fgi.hwndCapture != IntPtr.Zero) d["frontCapture"] = Who(fgi.hwndCapture);
+            return d;
+        }
     }
 
     // The screen going off and on (Windows does that without sleeping), and sleep as Windows

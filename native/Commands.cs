@@ -40,6 +40,8 @@ namespace VyseHost
                 case "refreshWindows": WindowTracker.Invalidate(); return true;
                 // what is under the pointer, when the dock's page has stopped hearing it (Pointer.cs)
                 case "pointAt": return Pointer.At((int)Program.Long(a, "x", 0), (int)Program.Long(a, "y", 0));
+                // the dock's window as Windows has it, for the log when the dock seems stuck
+                case "dockWin": return Pointer.DockWin(Program.Hwnd(a), (int)Program.Long(a, "x", 0), (int)Program.Long(a, "y", 0));
 
                 // taskbar and appbar
                 case "hideTaskbar":

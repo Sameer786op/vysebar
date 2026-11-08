@@ -68,6 +68,11 @@ namespace VyseHost
         const int SIGNATURE = 0x34753423;
         static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         const uint SWP_NOSIZE = 1, SWP_NOMOVE = 2, SWP_NOACTIVATE = 0x10;
+        const uint WM_WINDOWPOSCHANGING = 0x46;
+        const int SWP_SHOWWINDOW = 0x40;
+        // the stand-in is never shown (see WndProc); when an app tries, the log says so
+        static bool showTried;
+        static DateTime showLogged = DateTime.MinValue;
         static readonly IntPtr TICK = new IntPtr(1), EMIT = new IntPtr(2);
 
         class Item
@@ -221,6 +226,21 @@ namespace VyseHost
 
         static IntPtr WndProc(IntPtr h, uint m, IntPtr w, IntPtr l)
         {
+            if (m == WM_WINDOWPOSCHANGING && l != IntPtr.Zero)
+            {
+                // An app that shows "the taskbar" by its class name finds this window first, as it
+                // is in front of Explorer's. Shown, it would cover the dock in front of everything,
+                // so it never shows: SWP_SHOWWINDOW comes out of WINDOWPOS.flags (after two
+                // handles and four ints)
+                int at = 2 * IntPtr.Size + 16;
+                int flags = Marshal.ReadInt32(l, at);
+                if ((flags & SWP_SHOWWINDOW) != 0)
+                {
+                    Marshal.WriteInt32(l, at, flags & ~SWP_SHOWWINDOW);
+                    showTried = true;
+                }
+                return DefWindowProc(h, m, w, l);
+            }
             if (m == WM_TIMER)
             {
                 // an error must not escape into Windows from here: it would end the helper
@@ -390,6 +410,21 @@ namespace VyseHost
                     // slow apps answer a second ask that arrives once start-up has settled
                     secondAsk = true;
                     Claim(true);
+                }
+            }
+            // shown all the same (a way around WndProc): hidden again within two seconds
+            if (Native.IsWindowVisible(me))
+            {
+                Native.ShowWindow(me, 0 /* SW_HIDE */);
+                showTried = true;
+            }
+            if (showTried)
+            {
+                showTried = false;
+                if ((DateTime.UtcNow - showLogged).TotalMinutes >= 10)
+                {
+                    showLogged = DateTime.UtcNow;
+                    Program.Log("an app tried to show the taskbar where VyseBar stands in for it, which would have covered the dock: kept hidden");
                 }
             }
             if (changed) QueueEmit();

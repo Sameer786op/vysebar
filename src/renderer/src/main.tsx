@@ -24,7 +24,7 @@ function App() {
       }),
     [],
   );
-  if (route.path === "dock") return <Dock displayId={Number(route.params.get("display"))} />;
+  if (route.path === "dock") return <Dock displayId={Number(route.params.get("display"))} quiet={route.params.get("quiet") === "1"} />;
   return (
     <Suspense fallback={null}>
       {route.path === "widgets" ? <Picker /> : <SettingsWindow page={route.params.get("page") ?? "appearance"} />}

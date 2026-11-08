@@ -167,7 +167,8 @@ function WidgetItem({ inst, def, look, remove, onDragEdge }: { inst: WidgetInsta
 
 // ---------- the dock ----------
 
-export function Dock({ displayId }: { displayId: number }) {
+/** quiet: a window started afresh in place of one gone wrong, which comes up in place instead of rising into it */
+export function Dock({ displayId, quiet = false }: { displayId: number; quiet?: boolean }) {
   const s = useSettings();
   const lite = useLite();
   const look = lookOf(s);
@@ -183,6 +184,12 @@ export function Dock({ displayId }: { displayId: number }) {
   const [reordering, setReordering] = useState(false);
   const plate = useRef<HTMLDivElement>(null);
   const cardRef = useRef<CardState | null>(null);
+  /** the last pointer event the page had, and states main asks about (see dock:probe) */
+  const lastPointer = useRef<{ t: number; x: number; y: number; type: string } | null>(null);
+  const menuOpen = useRef(false);
+  const hiddenRef = useRef(false);
+  menuOpen.current = !!menu;
+  hiddenRef.current = hidden;
   const focused = useRef(false);
   const dragging = useRef(false);
   const lastDrag = useRef(0);
@@ -330,6 +337,8 @@ export function Dock({ displayId }: { displayId: number }) {
   }, [closeCard]);
 
   // ---- the mouse: only the dock and what is open out of it take it ----
+  // Main has the window take the mouse while the pointer is on a hit area (docks.ts); the page
+  // says so too as it hears the pointer, and asks for it while something is open or dragged.
   useEffect(() => {
     let last: boolean | null = null;
     const set = (on: boolean) => {
@@ -337,16 +346,19 @@ export function Dock({ displayId }: { displayId: number }) {
       last = on;
       vyse.send("dock:interactive", on);
     };
-    // main checks that this page still hears the pointer moving over its window (docks.ts)
+    // main checks that this page hears the pointer while the dock takes the mouse, and that a
+    // mouse move lands where the pointer really is (docks.ts)
     let heard = 0;
-    const hear = () => {
-      const t = performance.now();
-      if (t - heard < 200) return;
-      heard = t;
-      vyse.send("dock:heard");
+    const hear = (e: PointerEvent | DragEvent) => {
+      const now = performance.now();
+      lastPointer.current = { t: now, x: e.clientX, y: e.clientY, type: e.type };
+      if (now - heard < 200) return;
+      heard = now;
+      const mouse = e.type === "pointermove" && (e as PointerEvent).pointerType === "mouse";
+      // how long ago, by this page's clock: main never compares its clock with this one
+      vyse.send("dock:heard", mouse ? { x: e.clientX, y: e.clientY, age: Math.max(0, performance.now() - e.timeStamp) } : null);
     };
     const move = (e: MouseEvent) => {
-      hear();
       const hit = dragging.current || !!document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-hit]");
       set(hit);
       if (useStore.getState().settings.autoHide) {
@@ -356,16 +368,66 @@ export function Dock({ displayId }: { displayId: number }) {
     };
     const leave = () => set(dragging.current);
     window.addEventListener("mousemove", move);
+    window.addEventListener("pointermove", hear, true);
     window.addEventListener("pointerdown", hear, true);
     window.addEventListener("dragover", hear, true);
     document.documentElement.addEventListener("mouseleave", leave);
     return () => {
       window.removeEventListener("mousemove", move);
+      window.removeEventListener("pointermove", hear, true);
       window.removeEventListener("pointerdown", hear, true);
       window.removeEventListener("dragover", hear, true);
       document.documentElement.removeEventListener("mouseleave", leave);
     };
   }, []);
+
+  // main asking how this page sees things, for the log when the dock seems stuck (docks.ts):
+  // only element kinds and states go back, never any text from the page
+  useEffect(
+    () =>
+      vyse.on("dock:probe", (q: { x: number; y: number }) => {
+        let frames = 0;
+        let sent = false;
+        const started = performance.now();
+        const reply = () => {
+          if (sent) return;
+          sent = true;
+          const el = document.elementFromPoint(q.x, q.y) as HTMLElement | null;
+          const glass = el?.closest("[data-glass]")?.getAttribute("data-glass");
+          const kind = !el ? "nothing" : `${el.tagName.toLowerCase()}${el.closest("[data-hit]") ? " in a hit area" : " outside the hit areas"}${glass ? ` (${glass})` : ""}`;
+          const lp = lastPointer.current;
+          const r = plate.current?.getBoundingClientRect();
+          vyse.send(
+            "dock:probed",
+            [
+              document.visibilityState,
+              document.hasFocus() ? "has the keyboard" : "",
+              `${frames} frames in ${Math.round(performance.now() - started)} ms`,
+              `${innerWidth}x${innerHeight} at ${Math.round(devicePixelRatio * 100)}%`,
+              r ? `plate ${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}` : "no plate",
+              `${document.querySelectorAll("[data-hit]").length} hit areas`,
+              `at the pointer (${Math.round(q.x)},${Math.round(q.y)}): ${kind}`,
+              lp ? `last ${lp.type} ${((performance.now() - lp.t) / 1000).toFixed(1)} s ago at ${Math.round(lp.x)},${Math.round(lp.y)}` : "no pointer heard yet",
+              cardRef.current ? "a card is open" : "",
+              menuOpen.current ? "a menu is open" : "",
+              hiddenRef.current ? "hidden (auto-hide)" : "",
+              dragging.current ? "dragging" : "",
+            ]
+              .filter(Boolean)
+              .join(", "),
+          );
+        };
+        const frame = () => {
+          frames++;
+          if (performance.now() - started < 300) requestAnimationFrame(frame);
+          else reply();
+        };
+        requestAnimationFrame(frame);
+        // a page whose frames have stopped still answers
+        setTimeout(reply, 700);
+      }),
+    [],
+  );
 
   // ---- auto-hide ----
   useEffect(() => {
@@ -432,7 +494,14 @@ export function Dock({ displayId }: { displayId: number }) {
   // once left main thinking it was 36 px lower than it is).
   const lastPlate = useRef("");
   const lastHits = useRef("");
+  const lastGeom = useRef("");
   const measureHits = useCallback(() => {
+    // the page's own size and scale, which main checks against its window and screen
+    const geom = `${innerWidth}x${innerHeight}@${devicePixelRatio}`;
+    if (geom !== lastGeom.current) {
+      lastGeom.current = geom;
+      vyse.send("dock:geom", { w: innerWidth, h: innerHeight, dpr: devicePixelRatio });
+    }
     const el = plate.current;
     if (el) {
       const r = el.getBoundingClientRect();
@@ -584,7 +653,7 @@ export function Dock({ displayId }: { displayId: number }) {
           data-glass="dock"
           className="pointer-events-auto flex shrink-0 items-center"
           style={plateStyle}
-          initial={{ opacity: 0, y: offscreen * 0.6, scale: 0.96 }}
+          initial={quiet ? false : { opacity: 0, y: offscreen * 0.6, scale: 0.96 }}
           animate={{ opacity: 1, y: hidden ? offscreen : pullY, scale: fit }}
           transition={{ type: "spring", stiffness: 380, damping: 34 }}
           onAnimationComplete={measureHits}

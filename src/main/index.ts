@@ -1,4 +1,4 @@
-import { app, powerMonitor, session } from "electron";
+import { app, Menu, powerMonitor, session } from "electron";
 import { host } from "./host";
 import { flushAll, settings } from "./store";
 import { registerTopicIpc } from "./topics";
@@ -12,7 +12,7 @@ import { initAutomations } from "./services/automations";
 import { initGoogle } from "./services/google";
 import { openSettings } from "./windows";
 import { applyEngineFlags, initMemoryTrim } from "./perf";
-import { allDocks, initDocks } from "./docks";
+import { allDocks, freshDocks, initDocks } from "./docks";
 import { initUpdates } from "./updater";
 import { initLog, log } from "./log";
 
@@ -30,13 +30,18 @@ if (!app.requestSingleInstanceLock()) {
   // for development: lets tooling inspect and screenshot the dock page
   if (!app.isPackaged && process.env.VYSE_DEBUG_PORT) app.commandLine.appendSwitch("remote-debugging-port", process.env.VYSE_DEBUG_PORT);
 
-  // opening VyseBar again while it runs shows Settings. Windows starting it at sign-in after you
+  // opening VyseBar again while it runs shows Settings, and starts the dock afresh: it's what
+  // you reach for when the dock has stopped working. Windows starting it at sign-in after you
   // already had, or a restart after an update or a hang, is not you asking for anything
   app.on("second-instance", (_e, argv) => {
     const flag = argv.find((a) => a === LOGIN_FLAG || a === "--updated" || a === "--recovered");
-    if (flag) log(`started again (${flag}) while running: nothing to open`);
-    else openSettings();
+    if (flag) return log(`started again (${flag}) while running: nothing to open`);
+    void freshDocks("VyseBar was opened again while it ran");
+    openSettings();
   });
+  // no application menu: its keys (reload, zoom, developer tools) would reach a dock card that
+  // has the keyboard, and VyseBar's windows have no menu bar
+  Menu.setApplicationMenu(null);
 
   // Windows shutting down, restarting or signing out doesn't quit apps the normal way: save
   // anything still waiting the moment Windows asks, before it ends the process

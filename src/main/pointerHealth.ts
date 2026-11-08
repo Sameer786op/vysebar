@@ -98,8 +98,6 @@ export function judgePoint(at: PointInfo, dockHwnd: number, skipped: (name: stri
 
 export type Repair =
   | "none"
-  /** a new mouse hook */
-  | "rearm"
   /** the dock in front of the always-on-top windows again */
   | "raise"
   /** the same, taking it out of always-on-top for an instant first */
@@ -114,18 +112,11 @@ export type Repair =
   | "stop";
 
 /**
- * taking: the dock had taken the mouse (the pointer is on its plate, a card, a menu or a toast);
- * otherwise it was click-through and only the hook can tell its page. verdict: what the helper
- * found under the pointer (null when it wasn't asked or didn't answer). step: 1 for a first
- * try, one more each time the last repair didn't hold.
+ * For a dock that had taken the mouse (the pointer is on its plate, a card, a menu or a toast)
+ * while its page heard nothing. verdict: what the helper found under the pointer (null when it
+ * didn't answer). step: 1 for a first try, one more each time the last repair didn't hold.
  */
-export function chooseRepair(taking: boolean, verdict: Verdict | null, step: number): Repair {
-  if (!taking) {
-    // main's own pointer watch keeps a click-through dock taking clicks without the hook, so
-    // this never goes as far as a restart
-    if (verdict === "busy") return "none";
-    return step <= 1 ? "rearm" : step === 2 ? "recreate" : "stop";
-  }
+export function chooseRepair(verdict: Verdict | null, step: number): Repair {
   switch (verdict) {
     case "busy":
     case "ours":
@@ -152,4 +143,21 @@ export class Ladder {
     this.at = now;
     return this.step;
   }
+}
+
+/** moves in a row heard away from the pointer that make a page that hears it in the wrong place */
+export const MAP_MISSES = 3;
+
+/**
+ * What is wrong between a dock page and its window, or "" when nothing is: the page laid out at
+ * a size other than its window's (a zoom, a resize it missed), drawn at a scale other than its
+ * screen's (a scale change it missed, waking from sleep), or hearing the pointer somewhere other
+ * than where it is (heardOff, from main's check of where mouse moves land). Any of these leaves
+ * main's idea of where the dock is and what you see apart: clicks miss, hovering does nothing.
+ */
+export function pageOff(page: { w: number; h: number; dpr: number }, win: { width: number; height: number }, scale: number, heardOff: string): string {
+  if (Math.abs(page.w - win.width) > 2 || Math.abs(page.h - win.height) > 2) return `the page is ${page.w}x${page.h}, its window ${win.width}x${win.height}`;
+  if (Math.abs(page.dpr - scale) > 0.02) return `the page draws at ${Math.round(page.dpr * 100)}%, its screen is at ${Math.round(scale * 100)}%`;
+  if (heardOff) return `the page hears the pointer ${heardOff} px from where it is`;
+  return "";
 }

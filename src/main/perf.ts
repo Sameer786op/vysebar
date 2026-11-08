@@ -40,9 +40,10 @@ async function trim(everything = false): Promise<void> {
   // give the renderers a moment to collect before their working sets go back
   await new Promise((r) => setTimeout(r, 1500));
   // Smooth keeps the GPU process warm: paging its textures and driver state back in is what
-  // makes the first hover after a quiet spell stutter
+  // makes the first hover after a quiet spell stutter. VyseBar's own main process is never
+  // trimmed: it watches the pointer for the dock, and paging it back in held that up
   const keepGpu = !everything && !isLite();
-  await host.try("trim", { pids: app.getAppMetrics().filter((m) => !(keepGpu && m.type === "GPU")).map((m) => m.pid) });
+  await host.try("trim", { pids: app.getAppMetrics().filter((m) => m.type !== "Browser" && !(keepGpu && m.type === "GPU")).map((m) => m.pid) });
 }
 
 export function initMemoryTrim(docks: () => BrowserWindow[]): void {
