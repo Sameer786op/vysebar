@@ -1,7 +1,7 @@
 {
   "name": "vysebar",
   "productName": "VyseBar",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "private": true,
   "description": "VyseBar: a smart dock for Windows 11 with live widgets. Replaces the taskbar.",
   "license": "MIT",

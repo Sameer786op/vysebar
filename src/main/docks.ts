@@ -10,8 +10,16 @@ import { host } from "./host";
 import { isLite, markActive, trimNow } from "./perf";
 import { settings } from "./store";
 import { log } from "./log";
+import { chooseRepair, coverName, judgePoint, Ladder, noteMove, type Deaf, type PointInfo, type Repair, type Verdict } from "./pointerHealth";
 
 const MAX_WINDOW_H = 760;
+
+interface Rect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
 
 interface Dock {
   win: BrowserWindow;
@@ -19,11 +27,17 @@ interface Dock {
   fullscreen: boolean;
   /** the renderer wants the mouse: the pointer is on the dock or a card is open */
   wants: boolean;
-  /** the dock plate in window coordinates, so a file dragged from Explorer can land on it */
-  plate: { x: number; y: number; width: number; height: number } | null;
-  overPlate: boolean;
+  /** where the dock takes the mouse, in window coordinates: the plate, and an open card, menu or toasts */
+  hits: Rect[];
+  /** the pointer is over one of them, as main sees it */
+  overHit: boolean;
   /** no window is open on this dock's screen (auto-hide keeps the dock up then) */
   desktop: boolean;
+  /** when the page last said it heard the pointer */
+  heardAt: number;
+  /** pointer moves over the window that its page hasn't heard */
+  deaf: Deaf | null;
+  born: number;
 }
 
 const docks = new Map<number, Dock>();
@@ -65,10 +79,13 @@ function dockDisplays(): Display[] {
   return [primary];
 }
 
+// tests can run a dock off the screen, out of the way of your pointer (never in an installed VyseBar)
+const testShift = app.isPackaged ? 0 : Number(process.env.VYSE_TEST_DOCK_DY) || 0;
+
 function geometry(d: Display) {
   const b = d.bounds;
   const h = Math.min(b.height, MAX_WINDOW_H);
-  return { x: b.x, y: settings.value.edge === "top" ? b.y : b.y + b.height - h, width: b.width, height: h };
+  return { x: b.x, y: (settings.value.edge === "top" ? b.y : b.y + b.height - h) + testShift, width: b.width, height: h };
 }
 
 const isGlass = () => {
@@ -129,7 +146,16 @@ function glassActivity(): void {
 
 function applyMouse(dock: Dock): void {
   if (dock.win.isDestroyed()) return;
-  dock.win.setIgnoreMouseEvents(!(dock.wants || dock.overPlate), { forward: true });
+  dock.win.setIgnoreMouseEvents(!(dock.wants || dock.overHit), { forward: true });
+}
+
+/** a page that is gone or starting over takes no mouse until it says where again */
+function forget(dock: Dock): void {
+  dock.hits = [];
+  dock.wants = false;
+  dock.overHit = false;
+  dock.deaf = null;
+  applyMouse(dock);
 }
 
 function createDock(d: Display): Dock {
@@ -166,7 +192,7 @@ function createDock(d: Display): Dock {
   loadPage(win, `dock?display=${d.id}`);
   // a game or video that already has this screen keeps it
   win.once("ready-to-show", () => !dock.fullscreen && win.showInactive());
-  const dock: Dock = { win, display: d, fullscreen: false, wants: false, plate: null, overPlate: false, desktop: false };
+  const dock: Dock = { win, display: d, fullscreen: false, wants: false, hits: [], overHit: false, desktop: false, heardAt: 0, deaf: null, born: Date.now() };
   win.on("unresponsive", () => log("the dock isn't taking input"));
   win.on("responsive", () => log("the dock is taking input again"));
   // Alt+F4 while a card has the keyboard would close the dock for good; like the taskbar, it
@@ -174,11 +200,14 @@ function createDock(d: Display): Dock {
   win.on("close", (e) => {
     if (!quitting) e.preventDefault();
   });
-  // a dock page that crashed (a GPU driver reset, the PC waking up) comes back by itself
+  // a dock page that crashed (a GPU driver reset, the PC waking up) comes back by itself, in a
+  // new window: Electron's mouse hook would go on pointing at the dead page's part of this one
   win.webContents.on("render-process-gone", (_e, why) => {
+    forget(dock);
     if (why.reason === "clean-exit") return;
-    setTimeout(() => !win.isDestroyed() && loadPage(win, `dock?display=${dock.display.id}`), 1000);
+    setTimeout(() => recreateDock(dock, `the dock page ended (${why.reason})`), 1000);
   });
+  win.webContents.on("did-start-loading", () => forget(dock));
   win.webContents.on("did-finish-load", () => {
     if (dock.desktop) win.webContents.send("dock:desktop", true);
   });
@@ -297,7 +326,11 @@ function watchPages(): void {
 let relayoutTimer: NodeJS.Timeout | null = null;
 function relayoutSoon(): void {
   if (relayoutTimer) clearTimeout(relayoutTimer);
-  relayoutTimer = setTimeout(layoutDocks, 400);
+  relayoutTimer = setTimeout(() => {
+    relayoutTimer = null;
+    layoutDocks();
+    rearmMouse("the screens changed");
+  }, 400);
 }
 
 export function applyTaskbar(): void {
@@ -327,22 +360,285 @@ function checkDesktop(): void {
   }
 }
 
-/** after sleep: the window is back where it belongs, drawn again, its space kept clear */
+/** after sleep: the window is back where it belongs and on top, drawn again, its space kept clear */
 function wakeDocks(): void {
-  for (const dock of docks.values()) {
+  for (const dock of [...docks.values()]) {
     if (dock.win.isDestroyed()) continue;
     if (dock.win.webContents.isCrashed()) {
-      loadPage(dock.win, `dock?display=${dock.display.id}`);
+      recreateDock(dock, "the dock page had crashed");
       continue;
     }
     dock.win.setBounds(geometry(dock.display));
     dock.win.setAlwaysOnTop(true, "pop-up-menu");
-    if (!dock.fullscreen) dock.win.showInactive();
+    if (!dock.fullscreen) {
+      dock.win.showInactive();
+      dock.win.moveTop();
+    }
     dock.win.webContents.invalidate();
     dock.win.webContents.send("dock:info", dockInfo(dock.win));
     reserve(dock);
+    void checkDrawing(dock);
   }
+  rearmMouse("after the PC woke or the screen came back", true);
   applyTaskbar();
+}
+
+/** checked over twice: as soon as the PC is back, and again once Windows has settled its screens */
+let wakeTimer: NodeJS.Timeout | null = null;
+function wakeSoon(why: string): void {
+  logEvery(`wake:${why}`, `${why}: checking the dock over`, 5000);
+  if (wakeTimer) return;
+  wakeTimer = setTimeout(() => {
+    wakeDocks();
+    wakeTimer = setTimeout(() => {
+      wakeTimer = null;
+      wakeDocks();
+    }, 4500);
+  }, 1500);
+}
+
+/** a line that could come often goes in the log at most once per `ms` */
+const lastSaid = new Map<string, number>();
+function logEvery(key: string, line: string, ms: number): void {
+  const now = Date.now();
+  if (now - (lastSaid.get(key) ?? 0) < ms) return;
+  lastSaid.set(key, now);
+  log(line);
+}
+
+/** a page whose drawing stopped (the graphics driver reset while the PC slept) is started afresh */
+async function checkDrawing(dock: Dock): Promise<void> {
+  if (dock.win.isDestroyed() || dock.fullscreen || !dock.win.isVisible()) return;
+  const wc = dock.win.webContents;
+  if (wc.isLoading() || Date.now() - dock.born < 5000) return;
+  const drew = await Promise.race([
+    wc.capturePage({ x: 0, y: 0, width: 1, height: 1 }).then(
+      (img) => !img.isEmpty(),
+      () => false,
+    ),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
+  ]);
+  if (!drew) recreateDock(dock, "the dock page wasn't drawing");
+}
+
+/** a new window for a dock that has gone wrong, in the same place; the old one goes once the new one shows */
+function recreateDock(dock: Dock, why: string): void {
+  if (quitting || docks.get(dock.display.id) !== dock) return;
+  log(`${why}: the dock window was started afresh`);
+  const old = dock.win;
+  const fresh = createDock(dock.display);
+  fresh.desktop = dock.desktop;
+  fresh.fullscreen = dock.fullscreen;
+  docks.set(dock.display.id, fresh);
+  if (!old.isDestroyed()) {
+    // meanwhile the old one lets every click through
+    old.setIgnoreMouseEvents(true);
+    const end = () => !old.isDestroyed() && old.destroy();
+    fresh.win.once("ready-to-show", end);
+    setTimeout(end, 3000);
+  }
+  // a new window joins whatever mouse hook is in, which may be the one that died
+  rearmMouse("a new dock window", true);
+}
+
+// ---- the dock really getting the pointer ----
+// Where a dock takes the mouse is decided here as well as in its page. While the dock is
+// click-through, the page hears the pointer only through a low-level mouse hook that Electron
+// keeps on VyseBar's main thread, and Windows drops such a hook without a word if that thread is
+// ever slow to answer it (VyseBar held up for a moment, the PC waking from sleep). The page then
+// hears nothing, never asks for the mouse, and the dock takes no clicks until VyseBar restarts.
+// So main also watches the pointer itself against the dock's hit areas, and checks that the page
+// hears the pointer moving over its window. When it doesn't, a new hook goes in; if that doesn't
+// hold, the helper says what is under the pointer and the cause is dealt with: another app's
+// window on top, a dock window gone wrong (started afresh), and last of all VyseBar restarting
+// itself, which is what fixed it by hand.
+
+/** in tests, a pretend pointer, so tests never move yours (never in an installed VyseBar) */
+const testPointer = (): Electron.Point | undefined => (app.isPackaged ? undefined : (globalThis as { __vyseTestPointer?: Electron.Point }).__vyseTestPointer);
+const cursorPoint = (): Electron.Point => testPointer() ?? screen.getCursorScreenPoint();
+
+// Electron puts its mouse hook in when a window starts forwarding and no other was; every dock
+// leaving click-through at once lets the old (maybe dead) hook go, and coming back puts in a new one
+let rearmedAt = 0;
+function rearmMouse(why: string, force = false): void {
+  const now = Date.now();
+  if (!force && now - rearmedAt < 2000) return;
+  rearmedAt = now;
+  const live = [...docks.values()].filter((d) => !d.win.isDestroyed());
+  for (const d of live) d.win.setIgnoreMouseEvents(false);
+  for (const d of live) applyMouse(d);
+  logEvery(`rearm:${why}`, `a new mouse hook went in (${why})`, 10 * 60_000);
+}
+
+function watchPointer(): void {
+  let lastCursor = { x: -1e9, y: -1e9 };
+  let lastTick = Date.now();
+  setInterval(() => {
+    const now = Date.now();
+    const gap = now - lastTick;
+    lastTick = now;
+    // sleep shows as a long pause whether or not Windows says so (Modern Standby often doesn't);
+    // a shorter one is VyseBar held up long enough for Windows to drop the hook
+    if (gap > 10_000) wakeSoon("VyseBar was paused for a while");
+    else if (gap > 500) rearmMouse("after VyseBar was held up");
+    const p = cursorPoint();
+    const moved = p.x !== lastCursor.x || p.y !== lastCursor.y;
+    if (moved) {
+      lastCursor = p;
+      glassActivity();
+    }
+    for (const dock of docks.values()) {
+      if (dock.win.isDestroyed() || !dock.win.isVisible()) continue;
+      const b = dock.win.getBounds();
+      // an Explorer drag sends no mouse moves to a click-through window either: this is what
+      // lets a file land on the plate
+      const over = dock.hits.some((r) => p.x >= b.x + r.x && p.x <= b.x + r.x + r.width && p.y >= b.y + r.y - 4 && p.y <= b.y + r.y + r.height + 4);
+      if (over !== dock.overHit) {
+        dock.overHit = over;
+        applyMouse(dock);
+      }
+      if (moved) listen(dock, p, b, now);
+    }
+  }, 60);
+}
+
+/** a pointer move over a dock's window, which its page should hear */
+let repairing = false;
+function listen(dock: Dock, p: Electron.Point, b: Electron.Rectangle, now: number): void {
+  const wc = dock.win.webContents;
+  // a few pixels in from the window's edges, where rounding can't put the pointer outside it
+  const inside = p.x >= b.x + 4 && p.x < b.x + b.width - 4 && p.y >= b.y + 4 && p.y < b.y + b.height - 4;
+  const taking = dock.wants || dock.overHit;
+  // taking the mouse, the page hears only the pointer over its hit areas: elsewhere another
+  // window may rightly be on top
+  if (!inside || (taking && !dock.overHit) || repairing || wc.isLoading() || wc.isCrashed() || now - dock.born < 3000) {
+    dock.deaf = null;
+    return;
+  }
+  const r = noteMove(dock.deaf, now, dock.heardAt);
+  dock.deaf = r.deaf;
+  if (r.act) void repair(dock, taking, p);
+}
+
+/** the page answering a ping: one that doesn't is busy (or hung, which watchPages sees to) */
+function pageAnswers(dock: Dock, ms = 1500): Promise<boolean> {
+  const wc = dock.win.webContents;
+  return new Promise((resolve) => {
+    const done = (ok: boolean) => {
+      clearTimeout(timer);
+      ipcMain.removeListener("vyse:pong", heard);
+      resolve(ok);
+    };
+    const heard = (e: Electron.IpcMainEvent) => e.sender === wc && done(true);
+    const timer = setTimeout(() => done(false), ms);
+    ipcMain.on("vyse:pong", heard);
+    if (wc.isDestroyed()) done(false);
+    else wc.send("vyse:ping");
+  });
+}
+
+const ladders = new Map<number, Ladder>();
+/** always-on-top windows the dock has given up pushing in front of, for now */
+const coversSkipped = new Map<string, number>();
+let lastClickThroughRecreate = 0;
+
+async function repair(dock: Dock, taking: boolean, p: Electron.Point): Promise<void> {
+  if (repairing) return;
+  repairing = true;
+  try {
+    const id = dock.display.id;
+    let ladder = ladders.get(id);
+    if (!ladder) ladders.set(id, (ladder = new Ladder()));
+    const step = ladder.next(Date.now());
+    // a first try in click-through costs nothing; anything more asks the helper what is there
+    let at: PointInfo | null = null;
+    if (taking || step > 1) {
+      const phys = screen.dipToScreenPoint(p);
+      at = await host.try<PointInfo>("pointAt", { x: Math.round(phys.x), y: Math.round(phys.y) }, 1500);
+    }
+    if (dock.win.isDestroyed() || docks.get(id) !== dock) return;
+    const now = Date.now();
+    const verdict = at ? judgePoint(at, hwndOf(dock.win), (name) => (coversSkipped.get(name) ?? 0) > now) : null;
+    let todo = chooseRepair(taking, verdict, step);
+    // why nothing is done, for the log
+    let held = todo !== "none" ? "" : verdict === "busy" ? "a mouse button was held or a menu was open" : verdict === "ours" ? "another VyseBar window is there" : verdict === "system" ? "a Windows menu or panel is there, or a window given up on" : "";
+    if ((todo === "recreate" || todo === "relaunch") && !(await pageAnswers(dock))) {
+      todo = "none";
+      held = "its page didn't answer either, which the page watch sees to";
+    }
+    // touch moves the pointer without the mouse hook ever seeing it, so it looks like a deaf
+    // click-through dock: no new window for that (a pretend test pointer is never touch), and
+    // a click-through dock is started afresh at most every ten minutes anyway
+    if (todo === "recreate" && !taking) {
+      if (at?.touch && !testPointer()) {
+        todo = "none";
+        held = "touch or a pen may have moved the pointer";
+      } else if (now - lastClickThroughRecreate < 10 * 60_000) todo = "stop";
+      else lastClickThroughRecreate = now;
+    }
+    const under = !at ? "" : !at.hwnd ? "no window" : at.ours ? (verdict === "dock" ? "the dock" : "a VyseBar window") : `${coverName(at)}${at.topmost ? ", always on top" : ""}${at.alpha !== undefined ? `, opacity ${at.alpha}` : ""}`;
+    const why = `the dock's page didn't hear the pointer (${taking ? "taking the mouse" : "click-through"}${under ? `; under the pointer: ${under}` : ""})`;
+    if (held) logEvery(`held:${held}`, `${why}: left alone, as ${held}`, 10 * 60_000);
+    carryOut(dock, todo, why, at, verdict);
+  } finally {
+    repairing = false;
+  }
+}
+
+function carryOut(dock: Dock, todo: Repair, why: string, at: PointInfo | null, verdict: Verdict | null): void {
+  const win = dock.win;
+  if (win.isDestroyed()) return;
+  switch (todo) {
+    case "none":
+      return;
+    case "rearm":
+      rearmMouse("its page had stopped hearing the pointer", true);
+      return;
+    case "raise":
+    case "raiseHard":
+      logEvery(`raise:${why}`, `${why}: the dock went back on top`, 60_000);
+      if (todo === "raiseHard") win.setAlwaysOnTop(false);
+      win.setAlwaysOnTop(true, "pop-up-menu");
+      win.moveTop();
+      return;
+    case "reapply":
+      log(`${why}: its window was put right`);
+      win.setIgnoreMouseEvents(false);
+      win.setAlwaysOnTop(true, "pop-up-menu");
+      if (!dock.fullscreen) win.showInactive();
+      win.moveTop();
+      applyMouse(dock);
+      return;
+    case "recreate":
+      recreateDock(dock, why);
+      return;
+    case "relaunch":
+      relaunchVyseBar(why);
+      return;
+    case "stop":
+      if (at && verdict === "covered") coversSkipped.set(coverName(at), Date.now() + 5 * 60_000);
+      logEvery(`stop:${why}`, `${why}: nothing more to try for now`, 10 * 60_000);
+  }
+}
+
+// VyseBar restarting itself, at most every ten minutes (a mark in userData says when it last did)
+const relaunchMark = () => join(app.getPath("userData"), "pointer-restart.txt");
+function relaunchVyseBar(why: string): void {
+  let last = 0;
+  try {
+    last = Number(readFileSync(relaunchMark(), "utf8")) || 0;
+  } catch {
+    /* it never has */
+  }
+  if (Date.now() - last < 10 * 60_000) return logEvery("relaunch", `${why}: VyseBar restarted itself for this a few minutes ago, so not again yet`, 10 * 60_000);
+  try {
+    writeFileSync(relaunchMark(), String(Date.now()));
+  } catch {
+    /* it restarts all the same */
+  }
+  log(`${why}: VyseBar restarts itself`);
+  app.relaunch({ args: [...process.argv.slice(1).filter((a) => a !== "--updated" && a !== "--recovered"), "--recovered"] });
+  app.quit();
 }
 
 /** Win+n goes to the dock on the main screen, like the Windows taskbar's keys */
@@ -361,9 +657,21 @@ export function initDocks(): void {
   applyTaskbar();
   if (host.ready) askGrabMode();
   watchPages();
-  screen.on("display-added", relayoutSoon);
-  screen.on("display-removed", relayoutSoon);
-  screen.on("display-metrics-changed", relayoutSoon);
+  watchPointer();
+  screen.on("display-added", (_e, d) => {
+    log(`a screen was added (${d.size.width}x${d.size.height} at ${Math.round(d.scaleFactor * 100)}%)`);
+    relayoutSoon();
+  });
+  screen.on("display-removed", () => {
+    log("a screen was removed");
+    relayoutSoon();
+  });
+  screen.on("display-metrics-changed", (_e, _d, changed) => {
+    logEvery("metrics", `a screen changed (${changed.join(", ")})`, 60_000);
+    relayoutSoon();
+  });
+  // tests reach the docks from the inspector (never in an installed VyseBar)
+  if (!app.isPackaged) Object.assign(globalThis, { __vyseDocks: { docks, rearmMouse, recreateDock, wakeSoon, host } });
 
   settings.onChange((v, prev) => {
     if (
@@ -392,7 +700,7 @@ export function initDocks(): void {
     const ending = n.key === "enter" || n.key === "esc" || n.key === "cancel";
     if (settings.value.autoHide) {
       if (!ending) dock.win.webContents.send("dock:reveal");
-      else setTimeout(() => !dock.win.isDestroyed() && !dock.overPlate && dock.win.webContents.send("dock:conceal"), 1200);
+      else setTimeout(() => !dock.win.isDestroyed() && !dock.overHit && dock.win.webContents.send("dock:conceal"), 1200);
     }
     navOn = !ending;
     dock.win.webContents.send("dock:nav", n);
@@ -407,10 +715,24 @@ export function initDocks(): void {
     dock.win.webContents.send("dock:shortcut", k.name);
   });
 
-  // after the PC sleeps or is locked, the dock is put back instead of leaving an empty strip
-  const wake = () => setTimeout(wakeDocks, 1500);
-  powerMonitor.on("resume", wake);
-  powerMonitor.on("unlock-screen", wake);
+  // after the PC sleeps, the screen is locked or goes dark, the dock is checked over: put back
+  // instead of leaving an empty strip, on top, drawing, and with a new mouse hook
+  powerMonitor.on("suspend", () => logEvery("sleep", "the PC is going to sleep", 30_000));
+  powerMonitor.on("resume", () => wakeSoon("the PC woke up"));
+  powerMonitor.on("lock-screen", () => log("the screen was locked"));
+  powerMonitor.on("unlock-screen", () => wakeSoon("the screen was unlocked"));
+  // the helper hears the screen itself go off and on, which needs no sleep (Pointer.cs)
+  let screenState: number | null = null;
+  host.on("screenPower", (state: number) => {
+    const was = screenState;
+    screenState = state;
+    if (was === null || was === state) return;
+    if (state === 0) log("the screen turned off");
+    else if (state === 1 && was === 0) wakeSoon("the screen came back on");
+  });
+  host.on("power", (what: string) => (what === "resume" ? wakeSoon("the PC woke up") : logEvery("sleep", "the PC is going to sleep", 30_000)));
+  // a graphics process that went (a driver reset) can leave a dock that doesn't draw
+  app.on("child-process-gone", (_e, d) => d.type === "GPU" && wakeSoon("the graphics process restarted"));
 
   host.on("hotkey", (k: { index: number; mode: string }) => {
     const dock = hotkeyDock();
@@ -419,7 +741,7 @@ export function initDocks(): void {
     // an auto-hidden dock comes up for a moment so you can see which app it was
     if (settings.value.autoHide) {
       dock.win.webContents.send("dock:reveal");
-      setTimeout(() => !dock.win.isDestroyed() && !dock.overPlate && dock.win.webContents.send("dock:conceal"), 1800);
+      setTimeout(() => !dock.win.isDestroyed() && !dock.overHit && dock.win.webContents.send("dock:conceal"), 1800);
     }
     dock.win.webContents.send("dock:hotkey", k);
   });
@@ -526,31 +848,21 @@ export function initDocks(): void {
     void host.try("peek", { on: true, hwnd, top: hwndOf(dock.win), x: r.x, y: r.y, w: r.width, h: r.height });
   });
 
-  ipcMain.on("dock:plate", (e, rect: Dock["plate"]) => {
+  // where the page takes the mouse (see watchPointer)
+  ipcMain.on("dock:hits", (e, rects: unknown) => {
     const dock = dockOf(e);
-    if (dock) dock.plate = rect;
+    if (!dock || !Array.isArray(rects)) return;
+    dock.hits = rects
+      .filter((r: Partial<Rect> | null): r is Rect => !!r && [r.x, r.y, r.width, r.height].every((v) => typeof v === "number" && Number.isFinite(v)))
+      .slice(0, 64);
   });
-
-  // an Explorer drag sends no mouse moves to a click-through window, so the pointer is
-  // watched here and the dock takes the mouse while it is over the plate
-  let lastCursor = { x: -1, y: -1 };
-  setInterval(() => {
-    const p = screen.getCursorScreenPoint();
-    if (p.x !== lastCursor.x || p.y !== lastCursor.y) {
-      lastCursor = p;
-      glassActivity();
-    }
-    for (const dock of docks.values()) {
-      if (!dock.plate || dock.win.isDestroyed() || !dock.win.isVisible()) continue;
-      const b = dock.win.getBounds();
-      const r = dock.plate;
-      const over = p.x >= b.x + r.x && p.x <= b.x + r.x + r.width && p.y >= b.y + r.y - 4 && p.y <= b.y + r.y + r.height + 4;
-      if (over !== dock.overPlate) {
-        dock.overPlate = over;
-        applyMouse(dock);
-      }
-    }
-  }, 60);
+  // the page heard the pointer: its mouse hook (or the pointer on it) works
+  ipcMain.on("dock:heard", (e) => {
+    const dock = dockOf(e);
+    if (!dock) return;
+    dock.heardAt = Date.now();
+    dock.deaf = null;
+  });
 
   // a card with a text field needs keyboard focus; giving it back returns focus to your app
   ipcMain.on("dock:focus", (e, on: boolean) => {

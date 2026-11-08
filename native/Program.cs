@@ -66,6 +66,7 @@ namespace VyseHost
             };
 
             WindowTracker.Start();
+            PowerWatch.Start();
             Thread reader = new Thread(ReadLoop);
             reader.IsBackground = true;
             reader.Start();

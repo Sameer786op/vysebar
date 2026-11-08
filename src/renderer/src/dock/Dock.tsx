@@ -337,7 +337,16 @@ export function Dock({ displayId }: { displayId: number }) {
       last = on;
       vyse.send("dock:interactive", on);
     };
+    // main checks that this page still hears the pointer moving over its window (docks.ts)
+    let heard = 0;
+    const hear = () => {
+      const t = performance.now();
+      if (t - heard < 200) return;
+      heard = t;
+      vyse.send("dock:heard");
+    };
     const move = (e: MouseEvent) => {
+      hear();
       const hit = dragging.current || !!document.elementFromPoint(e.clientX, e.clientY)?.closest("[data-hit]");
       set(hit);
       if (useStore.getState().settings.autoHide) {
@@ -347,9 +356,13 @@ export function Dock({ displayId }: { displayId: number }) {
     };
     const leave = () => set(dragging.current);
     window.addEventListener("mousemove", move);
+    window.addEventListener("pointerdown", hear, true);
+    window.addEventListener("dragover", hear, true);
     document.documentElement.addEventListener("mouseleave", leave);
     return () => {
       window.removeEventListener("mousemove", move);
+      window.removeEventListener("pointerdown", hear, true);
+      window.removeEventListener("dragover", hear, true);
       document.documentElement.removeEventListener("mouseleave", leave);
     };
   }, []);
@@ -410,24 +423,52 @@ export function Dock({ displayId }: { displayId: number }) {
     };
   }, [s.distance, s.fullWidth]);
 
-  // ---- where the plate is: for cards, toasts and Explorer drags ----
-  useLayoutEffect(() => {
+  // ---- where the dock takes the mouse: the plate, and what is open out of it ----
+  // Measured where they really are, for cards and toasts to line up with and for main, which
+  // watches the pointer against them itself: the dock then takes clicks even after Windows has
+  // quietly dropped the mouse hook that normally tells this page where the pointer is. Measured
+  // after every render and animation and four times a second as well, since a spring or a
+  // slide moves them without anything resizing to say so (the plate's rise into place at start
+  // once left main thinking it was 36 px lower than it is).
+  const lastPlate = useRef("");
+  const lastHits = useRef("");
+  const measureHits = useCallback(() => {
     const el = plate.current;
-    if (!el) return;
-    const report = () => {
+    if (el) {
       const r = el.getBoundingClientRect();
-      setPlateRect(r);
-      vyse.send("dock:plate", { x: r.left, y: r.top, width: r.width, height: r.height });
-    };
-    const ro = new ResizeObserver(report);
-    ro.observe(el);
-    window.addEventListener("resize", report);
-    report();
+      const k = `${Math.round(r.left)},${Math.round(r.top)},${Math.round(r.width)},${Math.round(r.height)}`;
+      if (k !== lastPlate.current) {
+        lastPlate.current = k;
+        setPlateRect(r);
+      }
+    }
+    const rects: { x: number; y: number; width: number; height: number }[] = [];
+    for (const n of document.querySelectorAll<HTMLElement>("[data-hit]")) {
+      // one inside another is counted with it
+      if (n.parentElement?.closest("[data-hit]")) continue;
+      const r = n.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      const x = Math.floor(r.left);
+      const y = Math.floor(r.top);
+      rects.push({ x, y, width: Math.ceil(r.right) - x, height: Math.ceil(r.bottom) - y });
+    }
+    const key = JSON.stringify(rects);
+    if (key === lastHits.current) return;
+    lastHits.current = key;
+    vyse.send("dock:hits", rects);
+  }, []);
+  useLayoutEffect(() => measureHits());
+  useEffect(() => {
+    const ro = new ResizeObserver(measureHits);
+    if (plate.current) ro.observe(plate.current);
+    const t = setInterval(measureHits, 250);
+    window.addEventListener("resize", measureHits);
     return () => {
       ro.disconnect();
-      window.removeEventListener("resize", report);
+      clearInterval(t);
+      window.removeEventListener("resize", measureHits);
     };
-  }, [edge, s.size, s.distance, s.fullWidth, hidden, fit]);
+  }, [measureHits]);
 
   // ---- battery alerts ----
   const battery = useBattery();
@@ -546,6 +587,7 @@ export function Dock({ displayId }: { displayId: number }) {
           initial={{ opacity: 0, y: offscreen * 0.6, scale: 0.96 }}
           animate={{ opacity: 1, y: hidden ? offscreen : pullY, scale: fit }}
           transition={{ type: "spring", stiffness: 380, damping: 34 }}
+          onAnimationComplete={measureHits}
           onPointerDown={platePointerDown}
           onPointerMove={platePointerMove}
           onPointerUp={platePointerUp}

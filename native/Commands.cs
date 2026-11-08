@@ -38,6 +38,8 @@ namespace VyseHost
                     try { Process.GetProcessById((int)Program.Long(a, "pid", 0)).Kill(); return true; }
                     catch { return false; }
                 case "refreshWindows": WindowTracker.Invalidate(); return true;
+                // what is under the pointer, when the dock's page has stopped hearing it (Pointer.cs)
+                case "pointAt": return Pointer.At((int)Program.Long(a, "x", 0), (int)Program.Long(a, "y", 0));
 
                 // taskbar and appbar
                 case "hideTaskbar":
