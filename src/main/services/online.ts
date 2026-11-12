@@ -301,7 +301,7 @@ async function calendars() {
 export function initOnlineTopics(): void {
   defineTopic("weather", poller(weather, 15 * 60_000));
   defineTopic("github", poller(github, 30 * 60_000));
-  defineTopic("currency", poller(currency, 6 * 3600_000));
+  defineTopic("currency", poller(currency, 3600_000));
   defineTopic("crypto", poller(crypto, 2 * 60_000));
   defineTopic("stocks", poller(stocks, 60_000));
   defineTopic("stripe", poller(stripe, 15 * 60_000));

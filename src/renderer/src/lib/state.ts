@@ -171,7 +171,11 @@ export function useBattery(): Battery | null {
     let mgr: any = null;
     let off = false;
     const read = () =>
-      mgr && setB({ level: mgr.level, charging: mgr.charging, chargingTime: mgr.chargingTime, dischargingTime: mgr.dischargingTime });
+      mgr &&
+      setB((old) => {
+        const now = { level: mgr.level, charging: mgr.charging, chargingTime: mgr.chargingTime, dischargingTime: mgr.dischargingTime };
+        return old && old.level === now.level && old.charging === now.charging && old.chargingTime === now.chargingTime && old.dischargingTime === now.dischargingTime ? old : now;
+      });
     (navigator as any)
       .getBattery?.()
       .then((m: any) => {
@@ -181,8 +185,11 @@ export function useBattery(): Battery | null {
         for (const ev of events) m.addEventListener(ev, read);
       })
       .catch(() => undefined);
+    // read again now and then too: a change while the PC slept can come without its event
+    const again = setInterval(read, 30_000);
     return () => {
       off = true;
+      clearInterval(again);
       if (mgr) for (const ev of events) mgr.removeEventListener(ev, read);
     };
   }, []);

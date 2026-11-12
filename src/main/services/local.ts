@@ -326,23 +326,41 @@ async function stillThere(path: string): Promise<boolean> {
   }
 }
 
+/** a known folder. Windows can fail to name one (moved, redirected to a cloud drive that isn't
+ * there, removed): the usual place under the home folder then, so the widget still works */
+function folder(name: "downloads" | "pictures", usual: string): string {
+  try {
+    return app.getPath(name);
+  } catch {
+    return join(homedir(), usual);
+  }
+}
+
+// screenshot thumbnails made once per picture (the feed is read every 15 s); the newest few kept
+const thumbs = new Map<string, string | undefined>();
+async function thumbOf(path: string, mtime: number): Promise<string | undefined> {
+  const key = `${path}|${mtime}`;
+  if (thumbs.has(key)) return thumbs.get(key);
+  let thumb: string | undefined;
+  try {
+    thumb = (await nativeImage.createThumbnailFromPath(path, { width: 240, height: 140 })).toDataURL();
+  } catch {
+    thumb = undefined;
+  }
+  thumbs.set(key, thumb);
+  while (thumbs.size > 24) thumbs.delete(thumbs.keys().next().value as string);
+  return thumb;
+}
+
 async function filesSummary() {
-  const downloads = app.getPath("downloads");
-  const shots = join(app.getPath("pictures"), "Screenshots");
+  const downloads = folder("downloads", "Downloads");
+  const shots = join(folder("pictures", "Pictures"), "Screenshots");
   const recentDir = join(process.env.APPDATA ?? "", "Microsoft", "Windows", "Recent");
   const dl = await Promise.all(
     (await latest(downloads, (f) => !/\.(crdownload|part|tmp)$/i.test(f), 6)).map(async (f) => ({ ...f, icon: await getIcon(f.path, 32) })),
   );
   const ss = await Promise.all(
-    (await latest(shots, (f) => /\.(png|jpe?g)$/i.test(f), 6)).map(async (f) => {
-      let thumb: string | undefined;
-      try {
-        thumb = (await nativeImage.createThumbnailFromPath(f.path, { width: 240, height: 140 })).toDataURL();
-      } catch {
-        thumb = undefined;
-      }
-      return { ...f, thumb };
-    }),
+    (await latest(shots, (f) => /\.(png|jpe?g)$/i.test(f), 6)).map(async (f) => ({ ...f, thumb: await thumbOf(f.path, f.mtime) })),
   );
   const targets = await Promise.all(
     (await latest(recentDir, (f) => f.toLowerCase().endsWith(".lnk"), 24)).map(async (f) => {

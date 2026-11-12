@@ -11,7 +11,7 @@ import { app, ipcMain } from "electron";
 import { PROVIDERS, REVENUE_PROVIDERS, isConnected, type ProviderData, type RevenueData, type UsageData, type UsageWindow } from "@shared/accounts";
 import { host } from "../host";
 import { settings } from "../store";
-import { defineTopic, poller, refreshTopic } from "../topics";
+import { defineTopic, isRefusal, passing, poller, refreshTopic } from "../topics";
 import { getJson, request, stripe } from "./online";
 import { initLocalAiTopics } from "./localai";
 import { writeFileAtomicSoon } from "../files";
@@ -432,7 +432,11 @@ async function read(id: string, fresh = false): Promise<ProviderData | { error: 
     if (value.kind === "usage" && value.windows[0]) value = { ...value, history: remember(id, value.windows[0].used) } satisfies UsageData;
   } catch (e) {
     const msg = (e as Error).message;
-    value = { error: /^40[13]/.test(msg) ? "The key was refused - check it in the card" : `Couldn't reach ${PROVIDERS.find((p) => p.id === id)?.name ?? "Stripe"}: ${msg}` };
+    const reach = { error: `Couldn't reach ${PROVIDERS.find((p) => p.id === id)?.name ?? "Stripe"}: ${msg}` };
+    if (/^40[13]\b/.test(msg)) value = { error: "The key was refused - check it in the card" };
+    else if (isRefusal(msg)) value = reach;
+    // no connection or a timeout: what was read before stays on show, and is asked for again soon
+    else throw passing(msg, reach);
   }
   cache.set(id, { at: Date.now(), value });
   return value;
@@ -597,7 +601,7 @@ export function initAccountTopics(): void {
   defineTopic("revenueTotal", poller(totalRevenue, 15 * 60_000));
   defineTopic("codex", poller(codexUsage, 60_000));
   initLocalAiTopics();
-  defineTopic("wallpapers", poller(wallpapers, 6 * 3600_000));
+  defineTopic("wallpapers", poller(wallpapers, 3600_000));
   defineTopic("temperature", poller(() => host.try("temperature"), 5000));
   defineTopic(
     "switches",

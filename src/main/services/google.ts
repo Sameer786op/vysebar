@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { app, ipcMain, safeStorage, shell } from "electron";
 import type { GoogleProfile } from "@shared/types";
 import { settings } from "../store";
-import { defineTopic, poller, publish, refreshTopic } from "../topics";
+import { defineTopic, isRefusal, passing, poller, publish, refreshTopic } from "../topics";
 import { getJson, request } from "./online";
 import { removeFileSoon, writeFileAtomicSoon } from "../files";
 
@@ -281,10 +281,17 @@ async function accessFor(extra: Extra): Promise<string | Need> {
 
 function googleError(e: unknown, extra: Extra): Need {
   const msg = (e as Error).message;
-  if (/^401/.test(msg)) access = null;
+  const reach = { error: `Couldn't reach ${EXTRA_NAME[extra]}: ${msg}` };
+  // an access token that ran out: a new one is fetched on the next try, which comes soon
+  if (/^401\b/.test(msg)) {
+    access = null;
+    throw passing(msg, reach);
+  }
   // the API isn't switched on for the OAuth client's Cloud project
-  if (/^403/.test(msg)) return { error: `Google refused: turn on the ${EXTRA_NAME[extra]} API in your Cloud project`, enable: API_PAGE[extra] };
-  return { error: `Couldn't reach ${EXTRA_NAME[extra]}: ${msg}` };
+  if (/^403\b/.test(msg)) return { error: `Google refused: turn on the ${EXTRA_NAME[extra]} API in your Cloud project`, enable: API_PAGE[extra] };
+  if (isRefusal(msg)) return reach;
+  // no connection or a timeout: the last mail and numbers stay on show while it asks again
+  throw passing(msg, reach);
 }
 
 const header = (m: any, name: string): string => m?.payload?.headers?.find((h: any) => String(h.name).toLowerCase() === name)?.value ?? "";
