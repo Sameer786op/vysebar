@@ -7,7 +7,7 @@ import { readFile, stat } from "node:fs/promises";
 import { app, BrowserWindow, ipcMain, nativeImage, powerMonitor, screen, type Display } from "electron";
 import type { DockInfo, WinInfo } from "@shared/types";
 import { host } from "./host";
-import { isLite, markActive, trimNow } from "./perf";
+import { isLite, keepResidentSoon, markActive, memoryNote, memorySnapshot, trimNow } from "./perf";
 import { settings } from "./store";
 import { log } from "./log";
 import { chooseRepair, coverName, judgePoint, Ladder, MAP_MISSES, noteMove, pageOff, type Deaf, type PointInfo, type Repair, type Verdict } from "./pointerHealth";
@@ -212,7 +212,11 @@ function createDock(d: Display, quiet = false): Dock {
   win.setContentProtection(hideFromCapture());
   loadPage(win, `dock?display=${d.id}${quiet ? "&quiet=1" : ""}`);
   // a game or video that already has this screen keeps it
-  win.once("ready-to-show", () => !dock.fullscreen && win.showInactive());
+  win.once("ready-to-show", () => {
+    if (!dock.fullscreen) win.showInactive();
+    // its page is a new process: it gets the dock's memory floor and place for the CPU
+    keepResidentSoon();
+  });
   const dock: Dock = {
     win,
     display: d,
@@ -819,9 +823,10 @@ async function snapshot(dock: Dock, why: string, always = false): Promise<void> 
     win.isVisible() ? "" : "hidden",
     dock.fullscreen ? "a fullscreen app has the screen" : "",
   ].filter(Boolean);
-  const [page, os] = await Promise.all([
+  const [page, os, mem] = await Promise.all([
     askPage(dock, p.x - b.x, p.y - b.y),
     host.try<DockWin>("dockWin", { hwnd: hwndOf(win), x: Math.round(phys.x), y: Math.round(phys.y) }, 1500),
+    memorySnapshot(),
   ]);
   const windows = !os
     ? "didn't answer"
@@ -838,7 +843,7 @@ async function snapshot(dock: Dock, why: string, always = false): Promise<void> 
         ]
           .filter(Boolean)
           .join(", ");
-  log(`${why}. Main: ${seen.join(", ")}. Page: ${page ?? "didn't answer"}. Windows: ${windows}`.slice(0, 2500));
+  log(`${why}. Main: ${seen.join(", ")}. Page: ${page ?? "didn't answer"}. Memory: ${mem}. Windows: ${windows}`.slice(0, 3000));
 }
 
 // VyseBar restarting itself, at most every ten minutes (a mark in userData says when it last did)
@@ -962,7 +967,11 @@ export function initDocks(): void {
   });
   host.on("power", (what: string) => (what === "resume" ? wakeSoon("the PC woke up") : logEvery("sleep", "the PC is going to sleep", 30_000)));
   // a graphics process that went (a driver reset) can leave a dock that doesn't draw
-  app.on("child-process-gone", (_e, d) => d.type === "GPU" && wakeSoon("the graphics process restarted"));
+  app.on("child-process-gone", (_e, d) => {
+    if (d.type !== "GPU") return;
+    wakeSoon("the graphics process restarted");
+    keepResidentSoon();
+  });
 
   host.on("hotkey", (k: { index: number; mode: string }) => {
     const dock = hotkeyDock();
@@ -1097,6 +1106,17 @@ export function initDocks(): void {
     if (!dock || !g) return;
     const [w, h, dpr] = [g.w, g.h, g.dpr].map(Number);
     if ([w, h, dpr].every((v) => Number.isFinite(v) && v > 0)) dock.geom = { w, h, dpr };
+  });
+  // the page was held up, or one of its scripts failed (lib/watch.ts): into the log, so a
+  // dock that stopped for a moment can be explained afterwards
+  ipcMain.on("dock:slow", (e, ms: unknown) => {
+    const v = Number(ms);
+    if (!dockOf(e) || !Number.isFinite(v) || v < 300) return;
+    logEvery("page-slow", `the dock's page was held up ${(v / 1000).toFixed(1)} s${memoryNote()}`, 60_000);
+  });
+  ipcMain.on("dock:error", (e, what: unknown) => {
+    if (!dockOf(e) || typeof what !== "string") return;
+    logEvery("page-error", `the dock's page: ${what.slice(0, 200)}`, 60_000);
   });
   // the page heard the pointer (with where, for a mouse move): the dock really gets it
   ipcMain.on("dock:heard", (e, at?: { x?: unknown; y?: unknown; age?: unknown } | null) => {

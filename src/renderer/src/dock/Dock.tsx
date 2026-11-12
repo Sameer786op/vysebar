@@ -12,6 +12,7 @@ import { Apps } from "./Apps";
 import { Card, Menu, Toasts, type CardState } from "./Overlay";
 import { Glass, type GlassMode } from "./Glass";
 import { useAlbumColor } from "../lib/albumColor";
+import { watchPage } from "../lib/watch";
 
 const vyse = window.vyse;
 
@@ -180,6 +181,7 @@ export function Dock({ displayId, quiet = false }: { displayId: number; quiet?: 
   const [pull, setPull] = useState(0);
   const [glassFailed, setGlassFailed] = useState(false);
   useEffect(() => setGlassFailed(false), [look.glass, lite]);
+  useEffect(() => watchPage(), []);
   const [order, setOrder] = useState<string[]>(s.widgets.map((w) => w.uid));
   const [reordering, setReordering] = useState(false);
   const plate = useRef<HTMLDivElement>(null);

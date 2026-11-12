@@ -5,7 +5,7 @@ import { stat } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join } from "node:path";
 import { app, shell } from "electron";
 import type { AppItem, Pin, WinInfo } from "@shared/types";
-import { writeFileAtomic } from "./files";
+import { writeFileAtomicSoon } from "./files";
 import { host } from "./host";
 import { log } from "./log";
 import { settings } from "./store";
@@ -36,7 +36,7 @@ function saveIcons(): void {
       if (iconCache.size <= ICON_LIMIT) break;
       iconCache.delete(key);
     }
-    writeFileAtomic(iconFile, JSON.stringify(Object.fromEntries(iconCache)));
+    writeFileAtomicSoon(iconFile, JSON.stringify(Object.fromEntries(iconCache)));
   }, 2000);
 }
 

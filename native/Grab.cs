@@ -17,6 +17,7 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Threading;
 using System.Windows.Forms;
+using Rect = System.Drawing.Rectangle;
 
 static class Grab
 {
@@ -75,8 +76,8 @@ static class Grab
         if (w <= 0 || h <= 0 || ow <= 0 || oh <= 0 || ow > 8192 || oh > 8192 || w > 16384 || h > 16384) return null;
         if (MagUsable())
         {
-            byte[] rgba = OnMag(delegate { return MagStrip(x, y, w, h, ow, oh); }, 3000);
-            if (rgba != null) return new Dictionary<string, object> { { "w", ow }, { "h", oh }, { "data", Convert.ToBase64String(rgba) } };
+            string rgba = OnMag(delegate { return MagStrip(x, y, w, h, ow, oh); }, 3000);
+            if (rgba != null) return new Dictionary<string, object> { { "w", ow }, { "h", oh }, { "data", rgba } };
             // a miss now and then is fine; a broken magnifier hands over to GDI below
             if (!magBroken) return null;
         }
@@ -135,7 +136,9 @@ static class Grab
         if (allow && MagUsable())
         {
             // one tiny read proves the magnifier answers on this PC
-            ok = OnMag(delegate { return MagStrip(0, 0, 16, 4, 4, 1); }, 5000) != null;
+            // at the bottom of the main screen, where the plate's own reads come from
+            Rect main = Screen.PrimaryScreen.Bounds;
+            ok = OnMag(delegate { return MagStrip(main.Left, main.Bottom - 4, 16, 4, 4, 1); }, 5000) != null;
             if (!ok) Broke("the first read came back empty");
         }
         return new Dictionary<string, object> { { "excludes", ok } };
@@ -152,10 +155,10 @@ static class Grab
             {
                 ui.BeginInvoke(new Action(delegate
                 {
-                    if (magCtl != IntPtr.Zero) DestroyWindow(magCtl);
-                    magCtl = IntPtr.Zero;
-                    ctlW = ctlH = 0;
+                    foreach (Ctl c in ctls) DestroyWindow(c.hwnd);
+                    ctls.Clear();
                     frame = new byte[0];
+                    shrunk = new byte[0];
                 }));
             }
             catch { }
@@ -179,15 +182,73 @@ static class Grab
     // GDI until main says the magnifier may be used; never again once it has failed
     static volatile bool magAllowed, magBroken;
     static bool magInit;
-    static IntPtr magHost, magCtl;
-    static int ctlW, ctlH, misses;
-    static IntPtr[] excluded = new IntPtr[0];
+    static IntPtr magHost;
+    static int misses;
     static readonly MagScalingCallback onFrame = OnFrame;
     static readonly EnumProc collect = Collect;
     static readonly List<IntPtr> found = new List<IntPtr>();
     static byte[] frame = new byte[0];
-    static int frameW, frameH, frameStride;
+    static byte[] shrunk = new byte[0];
+    // the picture's width and stride, and the rows of it kept: frameH rows from row frameTop
+    static int frameW, frameH, frameStride, frameTop;
+    // the rows a read needs, set before it so the picture's callback copies only those
+    static int wantTop, wantRows;
     static bool frameGot;
+
+    // A magnifier control draws a picture its own size, and one can't be resized after it has
+    // drawn (that crashes inside Windows). Pointed somewhere new, it goes on handing over the old
+    // place's picture for a read or two. A new control for every read (a card's opening animation
+    // changes the rect every frame) was slow, 150 ms a read, and each one left memory behind in
+    // Windows, hundreds of MB within minutes. So each control reads one place only, made once and
+    // kept: the bottom or top rows of a screen (the plate, a row of tiles) or the whole screen (a
+    // card, previews), and each read is cut out of that picture.
+    class Ctl { public IntPtr hwnd; public Rect at; public IntPtr[] excluded = new IntPtr[0]; public long used; }
+    static readonly List<Ctl> ctls = new List<Ctl>();
+    static long uses;
+    /// magnifier controls made since the helper started, for main's log
+    public static int Made;
+    // two screens' worth (the plate's rows and the whole screen); a third screen's take turns
+    const int KeepCtls = 4;
+    // rows (physical pixels) a strip read covers: the plate and its tiles at any scale
+    const int StripRows = 256;
+
+    /// the one place a read of rect comes from; empty when none of it is on a screen
+    static Rect SourceFor(Rect rect)
+    {
+        Rect mon = Screen.FromRectangle(rect).Bounds;
+        Rect part = Rect.Intersect(rect, mon);
+        if (part.IsEmpty) return Rect.Empty;
+        // reaching onto another screen: all of them
+        if (part != rect)
+        {
+            Rect all = SystemInformation.VirtualScreen;
+            if (Rect.Intersect(rect, all) != part) return all;
+        }
+        int rows = Math.Min(StripRows, mon.Height);
+        if (part.Top >= mon.Bottom - rows) return new Rect(mon.Left, mon.Bottom - rows, mon.Width, rows);
+        if (part.Bottom <= mon.Top + rows) return new Rect(mon.Left, mon.Top, mon.Width, rows);
+        return mon;
+    }
+
+    static Ctl ControlFor(Rect at)
+    {
+        foreach (Ctl c in ctls)
+            if (c.at == at) { c.used = ++uses; return c; }
+        if (ctls.Count >= KeepCtls)
+        {
+            Ctl old = ctls[0];
+            foreach (Ctl c in ctls) if (c.used < old.used) old = c;
+            DestroyWindow(old.hwnd);
+            ctls.Remove(old);
+        }
+        IntPtr hwnd = CreateWindowEx(0, "Magnifier", "", WS_CHILD | WS_VISIBLE, 0, 0, at.Width, at.Height, magHost, IntPtr.Zero, GetModuleHandle(null), IntPtr.Zero);
+        if (hwnd == IntPtr.Zero) { Broke("no magnifier control"); return null; }
+        if (!MagSetImageScalingCallback(hwnd, onFrame)) { DestroyWindow(hwnd); Broke("no picture callback"); return null; }
+        Made++;
+        Ctl made = new Ctl { hwnd = hwnd, at = at, used = ++uses };
+        ctls.Add(made);
+        return made;
+    }
 
     static bool MagUsable()
     {
@@ -234,7 +295,7 @@ static class Grab
 
     /// <summary>on the magnifier's thread: the screen rect, VyseBar left out, shrunk to ow x oh RGBA</summary>
     [HandleProcessCorruptedStateExceptions, SecurityCritical]
-    static byte[] MagStrip(int x, int y, int w, int h, int ow, int oh)
+    static string MagStrip(int x, int y, int w, int h, int ow, int oh)
     {
         if (magBroken) return null;
         try
@@ -247,34 +308,33 @@ static class Grab
                 if (magHost == IntPtr.Zero) { Broke("no host window"); return null; }
                 SetLayeredWindowAttributes(magHost, 0, 255, LWA_ALPHA);
             }
-            // the control draws a picture its own size. Resizing one after it has drawn crashes
-            // inside Windows, so each new size gets a new control
-            if (magCtl == IntPtr.Zero || ctlW != w || ctlH != h)
+            Rect at = SourceFor(new Rect(x, y, w, h));
+            // nothing of it on a screen: black, as GDI reads it
+            if (at.IsEmpty)
             {
-                if (magCtl != IntPtr.Zero) DestroyWindow(magCtl);
-                magCtl = CreateWindowEx(0, "Magnifier", "", WS_CHILD | WS_VISIBLE, 0, 0, w, h, magHost, IntPtr.Zero, GetModuleHandle(null), IntPtr.Zero);
-                ctlW = ctlH = 0;
-                excluded = new IntPtr[0];
-                if (magCtl == IntPtr.Zero) { Broke("no magnifier control"); return null; }
-                if (!MagSetImageScalingCallback(magCtl, onFrame)) { Broke("no picture callback"); return null; }
-                ctlW = w;
-                ctlH = h;
+                int none = Shrink(frame, 0, 0, 0, -w, -h, w, h, ow, oh);
+                return Convert.ToBase64String(shrunk, 0, none);
             }
+            Ctl ctl = ControlFor(at);
+            if (ctl == null) return null;
             // VyseBar's windows right now (a card or the Settings window may have opened)
             found.Clear();
             EnumWindows(collect, IntPtr.Zero);
-            if (!SameWindows(found, excluded))
+            if (!SameWindows(found, ctl.excluded))
             {
                 IntPtr[] list = found.ToArray();
-                if (list.Length > 0 && !MagSetWindowFilterList(magCtl, MW_FILTERMODE_EXCLUDE, list.Length, list)) return Missed();
-                excluded = list;
+                if (list.Length > 0 && !MagSetWindowFilterList(ctl.hwnd, MW_FILTERMODE_EXCLUDE, list.Length, list)) return Missed();
+                ctl.excluded = list;
             }
             frameGot = false;
-            MRECT r = new MRECT { left = x, top = y, right = x + w, bottom = y + h };
-            if (!MagSetWindowSource(magCtl, r) || !frameGot) return Missed();
-            if (frameW < 1 || frameH < 1 || frameStride < frameW * 4 || frame.Length < frameStride * frameH) return Missed();
+            wantTop = y - at.Top;
+            wantRows = h;
+            MRECT r = new MRECT { left = at.Left, top = at.Top, right = at.Right, bottom = at.Bottom };
+            if (!MagSetWindowSource(ctl.hwnd, r) || !frameGot) return Missed();
+            if (frameW < 1 || frameStride < frameW * 4 || frame.Length < frameStride * frameH) return Missed();
             misses = 0;
-            return Shrink(frame, frameW, frameH, frameStride, ow, oh);
+            int n = Shrink(frame, frameW, frameH, frameStride, x - at.Left, y - at.Top - frameTop, w, h, ow, oh);
+            return Convert.ToBase64String(shrunk, 0, n);
         }
         catch (Exception e)
         {
@@ -288,11 +348,11 @@ static class Grab
     // of those in a row hand the reads over to GDI
     static int stalls;
 
-    static byte[] OnMag(Func<byte[]> fn, int ms)
+    static string OnMag(Func<string> fn, int ms)
     {
         Control ui = magUi;
         if (ui == null) return null;
-        byte[] result = null;
+        string result = null;
         IAsyncResult r;
         try
         {
@@ -314,7 +374,7 @@ static class Grab
     }
 
     // a few misses in a row mean the magnifier doesn't answer on this PC
-    static byte[] Missed()
+    static string Missed()
     {
         if (++misses >= 3) Broke("no picture three times in a row");
         return null;
@@ -324,13 +384,21 @@ static class Grab
     {
         try
         {
-            int n = (int)srcHeader.cbSize.ToUInt64();
-            if (src == IntPtr.Zero || n <= 0) return true;
-            if (frame.Length != n) frame = new byte[n];
-            Marshal.Copy(src, frame, 0, n);
-            frameW = (int)srcHeader.width;
-            frameH = (int)srcHeader.height;
-            frameStride = (int)srcHeader.stride;
+            long size = (long)srcHeader.cbSize.ToUInt64();
+            int sw = (int)srcHeader.width, stride = (int)srcHeader.stride;
+            if (src == IntPtr.Zero || sw <= 0 || stride < sw * 4) return true;
+            int sh = (int)Math.Min((long)srcHeader.height, size / stride);
+            // only the rows the read needs (a card's, not the whole screen's), into a buffer kept
+            // at the biggest size seen: the plate and a card take turns without new buffers
+            int top = Math.Min(Math.Max(wantTop, 0), sh);
+            int rows = Math.Max(0, Math.Min(wantRows + Math.Min(wantTop, 0), sh - top));
+            int n = rows * stride;
+            if (frame.Length < n) frame = new byte[n];
+            if (n > 0) Marshal.Copy(new IntPtr(src.ToInt64() + (long)top * stride), frame, 0, n);
+            frameW = sw;
+            frameH = rows;
+            frameStride = stride;
+            frameTop = top;
             frameGot = true;
         }
         catch { }
@@ -352,18 +420,26 @@ static class Grab
         return true;
     }
 
-    // a box filter from the magnifier's BGRA down to ow x oh, as RGBA for WebGL
-    static byte[] Shrink(byte[] src, int sw, int sh, int stride, int ow, int oh)
+    // a box filter from the sw x sh rect at left,top of the magnifier's BGRA (fw x fh; where the
+    // rect reaches past it is black) down to ow x oh, as RGBA for WebGL, into the shared output
+    // buffer; gives the number of bytes written
+    static int Shrink(byte[] src, int fw, int fh, int stride, int left, int top, int sw, int sh, int ow, int oh)
     {
-        byte[] dst = new byte[ow * oh * 4];
+        int len = ow * oh * 4;
+        if (shrunk.Length < len) shrunk = new byte[len];
+        byte[] dst = shrunk;
         for (int oy = 0; oy < oh; oy++)
         {
-            int y0 = (int)((long)oy * sh / oh);
-            int y1 = Math.Max(y0 + 1, (int)((long)(oy + 1) * sh / oh));
+            int y0 = top + (int)((long)oy * sh / oh);
+            int y1 = Math.Max(y0 + 1, top + (int)((long)(oy + 1) * sh / oh));
+            y0 = Math.Max(y0, 0);
+            y1 = Math.Min(y1, fh);
             for (int ox = 0; ox < ow; ox++)
             {
-                int x0 = (int)((long)ox * sw / ow);
-                int x1 = Math.Max(x0 + 1, (int)((long)(ox + 1) * sw / ow));
+                int x0 = left + (int)((long)ox * sw / ow);
+                int x1 = Math.Max(x0 + 1, left + (int)((long)(ox + 1) * sw / ow));
+                x0 = Math.Max(x0, 0);
+                x1 = Math.Min(x1, fw);
                 int b = 0, g = 0, r = 0, c = 0;
                 for (int yy = y0; yy < y1; yy++)
                 {
@@ -376,6 +452,7 @@ static class Grab
                         c++;
                     }
                 }
+                if (c == 0) c = 1;
                 int o = (oy * ow + ox) * 4;
                 dst[o] = (byte)(r / c);
                 dst[o + 1] = (byte)(g / c);
@@ -383,6 +460,6 @@ static class Grab
                 dst[o + 3] = 255;
             }
         }
-        return dst;
+        return len;
     }
 }

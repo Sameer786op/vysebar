@@ -26,6 +26,8 @@ class Host extends EventEmitter {
   private restarts = 0;
   /** the helper has said it's ready, and hasn't gone since */
   ready = false;
+  /** goes up each time a helper starts, so settings made in the last one can be made again */
+  generation = 0;
   private health: NodeJS.Timeout | null = null;
   private misses = 0;
   private checking = false;
@@ -106,6 +108,7 @@ class Host extends EventEmitter {
     if (msg.type === "ready") {
       this.restarts = 0;
       this.ready = true;
+      this.generation++;
       this.misses = 0;
       if (watchdogOn) {
         const args = process.argv.slice(1).filter((a) => a !== "--updated" && a !== "--recovered");

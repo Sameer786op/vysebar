@@ -9,7 +9,7 @@ import { host } from "../host";
 import { getIcon } from "../apps";
 import { settings } from "../store";
 import { defineTopic, poller } from "../topics";
-import { writeFileAtomic } from "../files";
+import { writeFileAtomic, writeFileAtomicSoon } from "../files";
 
 // ---------- Claude Code: tokens from its local history, in 5-hour session windows ----------
 
@@ -275,10 +275,12 @@ async function screenTimeSummary() {
   return { today: { total: today.total, hours: today.hours, apps }, week, weekApps: weekTop, current: fgName };
 }
 
-function saveScreenTime(): void {
+function saveScreenTime(now = false): void {
   const keep = new Set(Array.from({ length: 30 }, (_, i) => dayKey(new Date(Date.now() - i * 86400_000))));
   for (const k of Object.keys(st.days)) if (!keep.has(k)) delete st.days[k];
-  writeFileAtomic(stFile, JSON.stringify(st));
+  // on quit at once; every minute in the background
+  if (now) writeFileAtomic(stFile, JSON.stringify(st));
+  else writeFileAtomicSoon(stFile, JSON.stringify(st));
 }
 
 export function screenTimeToday(): number {
@@ -384,6 +386,6 @@ export function initLocalTopics(): void {
   powerMonitor.on("suspend", () => (locked = true));
   powerMonitor.on("resume", () => (locked = false));
   setInterval(() => tickScreenTime(5), 5000);
-  setInterval(saveScreenTime, 60_000);
-  app.on("before-quit", saveScreenTime);
+  setInterval(() => saveScreenTime(), 60_000);
+  app.on("before-quit", () => saveScreenTime(true));
 }

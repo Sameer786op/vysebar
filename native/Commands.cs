@@ -12,6 +12,8 @@ namespace VyseHost
             switch (cmd)
             {
                 case "ping": return "pong";
+                // the helper's own memory and handles, for main's log and for finding leaks
+                case "mem": return Program.Memory();
                 // the window thread answering, for main's check that the helper isn't stuck
                 case "uiPing": return Program.OnUiSync(delegate { return (object)"pong"; }, 4000);
                 // VyseBar's own command line, so a VyseBar that has stopped answering can be started again
@@ -77,10 +79,17 @@ namespace VyseHost
                         if (a.TryGetValue("pids", out raw) && raw is System.Collections.IEnumerable)
                             foreach (object pid in (System.Collections.IEnumerable)raw)
                                 if (Native.TrimProcess(Convert.ToUInt32(pid))) n++;
-                        GC.Collect();
-                        Native.EmptyWorkingSet(Native.GetCurrentProcess());
+                        // the helper itself only in lite mode: its pages back from disk are the
+                        // dock waiting for its window list and previews
+                        if (Program.Bool(a, "self", true))
+                        {
+                            GC.Collect();
+                            Native.EmptyWorkingSet(Native.GetCurrentProcess());
+                        }
                         return n;
                     }
+                // the dock's own processes kept in memory and first for the CPU (Resident.cs)
+                case "resident": return Resident.Apply(a);
                 // more switches and readings (Extras.cs)
                 case "temperature": return Extras.Temperature();
                 case "location": return await Location.Get();

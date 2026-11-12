@@ -14,7 +14,7 @@ import { settings } from "../store";
 import { defineTopic, poller, refreshTopic } from "../topics";
 import { getJson, request, stripe } from "./online";
 import { initLocalAiTopics } from "./localai";
-import { writeFileAtomic } from "../files";
+import { writeFileAtomicSoon } from "../files";
 
 type Keys = Record<string, string>;
 const day = (t: number) => new Date(t).toISOString().slice(0, 10);
@@ -415,7 +415,7 @@ export function remember(id: string, used: number): { t: number; used: number }[
   list.push({ t: now, used: v });
   history[id] = list.slice(-400);
   // written whole, one at a time: two overlapping writes could leave the file half each
-  writeFileAtomic(historyFile, JSON.stringify(history));
+  writeFileAtomicSoon(historyFile, JSON.stringify(history));
   return history[id];
 }
 

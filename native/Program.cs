@@ -6,7 +6,9 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -124,6 +126,7 @@ namespace VyseHost
                 ? (Dictionary<string, object>)msg["args"] : new Dictionary<string, object>();
             Task.Run(async () =>
             {
+                Stopwatch took = Stopwatch.StartNew();
                 try
                 {
                     object result = await Commands.Run(cmd, a);
@@ -133,7 +136,26 @@ namespace VyseHost
                 {
                     Reply(id, false, null, e.Message);
                 }
+                Slow(cmd, took.ElapsedMilliseconds);
             });
+        }
+
+        // a command that took seconds is the dock waiting on something: the log says which, at
+        // most once in five minutes for each. Some are slow by nature (a location fix, reading
+        // text in a picture, setting a wallpaper, listing every Start menu app)
+        static readonly HashSet<string> SlowByNature = new HashSet<string> { "location", "ocr", "setWallpaper", "startApps", "open", "watchdog", "snip" };
+        static readonly Dictionary<string, DateTime> slowAt = new Dictionary<string, DateTime>();
+
+        static void Slow(string cmd, long ms)
+        {
+            if (ms < 2000 || SlowByNature.Contains(cmd)) return;
+            lock (slowAt)
+            {
+                DateTime at;
+                if (slowAt.TryGetValue(cmd, out at) && (DateTime.UtcNow - at).TotalMinutes < 5) return;
+                slowAt[cmd] = DateTime.UtcNow;
+            }
+            Log("the helper took " + (ms / 1000.0).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " s for " + cmd);
         }
 
         static void Reply(object id, bool ok, object result, string error)
@@ -183,6 +205,27 @@ namespace VyseHost
         }
 
         public static void Log(string text) { Send("log", text); }
+
+        [DllImport("user32.dll")] static extern int GetGuiResources(IntPtr process, int flags);
+
+        /// what the helper holds: managed heap, the whole process, and its handles
+        public static object Memory()
+        {
+            using (Process me = Process.GetCurrentProcess())
+            {
+                return new Dictionary<string, object>
+                {
+                    { "managed", GC.GetTotalMemory(false) / 1048576 },
+                    { "private", me.PrivateMemorySize64 / 1048576 },
+                    { "ram", me.WorkingSet64 / 1048576 },
+                    { "handles", me.HandleCount },
+                    { "gdi", GetGuiResources(me.Handle, 0) },
+                    { "user", GetGuiResources(me.Handle, 1) },
+                    { "magnifiers", Grab.Made },
+                    { "gc", GC.CollectionCount(0) + "/" + GC.CollectionCount(1) + "/" + GC.CollectionCount(2) },
+                };
+            }
+        }
 
         // the same error over and over (a timer that keeps failing) is written down once a minute
         static readonly Dictionary<string, DateTime> lastErrors = new Dictionary<string, DateTime>();

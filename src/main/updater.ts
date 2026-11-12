@@ -11,7 +11,7 @@ import { broadcast } from "./broadcast";
 import { host } from "./host";
 import { flushAll } from "./store";
 import { toast } from "./services/automations";
-import { log } from "./log";
+import { logNow } from "./log";
 
 const { autoUpdater } = updater;
 
@@ -83,7 +83,7 @@ export function check(): void {
 export async function installNow(): Promise<void> {
   if (state.status !== "ready" || installing) return;
   installing = true;
-  log(`installing ${state.next ?? "an update"}`);
+  logNow(`installing ${state.next ?? "an update"}`);
   flushAll();
   // the installer replaces the helper too, so it must be gone first (it puts the taskbar back)
   await host.stopAndWait(4000);

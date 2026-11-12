@@ -11,10 +11,10 @@ import { initAccountTopics } from "./services/accounts";
 import { initAutomations } from "./services/automations";
 import { initGoogle } from "./services/google";
 import { openSettings } from "./windows";
-import { applyEngineFlags, initMemoryTrim } from "./perf";
+import { applyEngineFlags, initMemoryTrim, memoryNote } from "./perf";
 import { allDocks, freshDocks, initDocks } from "./docks";
 import { initUpdates } from "./updater";
-import { initLog, log } from "./log";
+import { initLog, log, logNow } from "./log";
 
 initLog();
 
@@ -48,7 +48,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("browser-window-created", (_e, win) => {
     win.on("query-session-end", () => flushAll());
     win.on("session-end", () => {
-      log("Windows is signing out or shutting down");
+      logNow("Windows is signing out or shutting down");
       flushAll();
     });
   });
@@ -111,7 +111,7 @@ if (!app.requestSingleInstanceLock()) {
     // whatever happens on the way out (a page that doesn't close), VyseBar is gone within a
     // few seconds of Quit
     deadline ??= setTimeout(() => {
-      log("quitting took too long: leaving now");
+      logNow("quitting took too long: leaving now");
       flushAll();
       host.stop();
       app.exit(0);
@@ -134,20 +134,21 @@ if (!app.requestSingleInstanceLock()) {
 // VyseBar's own thread being held up shows as a dock that doesn't answer (and a pointer that
 // stutters): the log says when and for how long, so a freeze can be traced afterwards
 function watchMainThread(): void {
+  const EVERY = 250;
   let last = Date.now();
   let worst = 0;
   let reportedAt = 0;
   powerMonitor.on("resume", () => (last = Date.now()));
   setInterval(() => {
     const now = Date.now();
-    const late = now - last - 1000;
+    const late = now - last - EVERY;
     last = now;
-    // minutes late is a PC that slept, not a busy thread
-    if (late >= 2000 && late <= 120_000) worst = Math.max(worst, late);
+    // half a second is a hover or click you notice; minutes late is a PC that slept
+    if (late >= 500 && late <= 120_000) worst = Math.max(worst, late);
     // at most a line a minute; one held back goes in once the minute is over
     if (!worst || now - reportedAt < 60_000) return;
     reportedAt = now;
-    log(`VyseBar's main thread was busy for ${(worst / 1000).toFixed(1)} s`);
+    log(`VyseBar's main thread was held up ${(worst / 1000).toFixed(1)} s${memoryNote()}`);
     worst = 0;
-  }, 1000);
+  }, EVERY);
 }

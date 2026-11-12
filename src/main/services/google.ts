@@ -17,6 +17,7 @@ import type { GoogleProfile } from "@shared/types";
 import { settings } from "../store";
 import { defineTopic, poller, publish, refreshTopic } from "../topics";
 import { getJson, request } from "./online";
+import { removeFileSoon, writeFileAtomicSoon } from "../files";
 
 const AUTH = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN = "https://oauth2.googleapis.com/token";
@@ -52,17 +53,22 @@ function saveScopes(scope: string | undefined): void {
   writeFileSync(scopesFile, JSON.stringify(granted));
 }
 
+// a 192 px photo is some 20-40 KB; anything far bigger isn't what was asked for
+const MAX_PHOTO = 256 * 1024;
 let profile: GoogleProfile | null = null;
 try {
   if (existsSync(profileFile)) profile = JSON.parse(readFileSync(profileFile, "utf8")) as GoogleProfile;
+  // a full-size original kept from before the size was always asked for (megabytes, read,
+  // written and sent to every window): the daily refresh brings a small one
+  if (profile?.photo && profile.photo.length > MAX_PHOTO) profile = { ...profile, photo: null };
 } catch {
   profile = null;
 }
 
 function saveProfile(p: GoogleProfile | null): void {
   profile = p;
-  if (p) writeFileSync(profileFile, JSON.stringify(p));
-  else rmSync(profileFile, { force: true });
+  if (p) writeFileAtomicSoon(profileFile, JSON.stringify(p));
+  else removeFileSoon(profileFile);
   publish("profile", p);
 }
 
@@ -101,12 +107,14 @@ function claims(idToken: string): Record<string, unknown> {
 async function photoOf(url: unknown): Promise<string | null> {
   if (typeof url !== "string" || !/^https:\/\/[a-z0-9.-]+\.googleusercontent\.com\//i.test(url)) return null;
   try {
-    // Google's picture links end in a size; ask for one sharp enough for a 2x tile
-    const sized = /=s\d+(-c)?$/.test(url) ? url.replace(/=s\d+(-c)?$/, "=s192-c") : url;
+    // Google's picture links take a size after "=" (=s96-c, =s96-c-mo, =w100-h100), and one
+    // without gives the full original, megabytes: always ask for one sharp enough for a 2x tile
+    const sized = `${url.replace(/=[swh]\d[\w-]*$/, "")}=s192-c`;
     const res = await request(sized);
     if (!res.ok) return null;
     const type = res.headers.get("content-type") || "image/jpeg";
-    return `data:${type};base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`;
+    const photo = `data:${type};base64,${Buffer.from(await res.arrayBuffer()).toString("base64")}`;
+    return photo.length <= MAX_PHOTO ? photo : null;
   } catch {
     return null;
   }

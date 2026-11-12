@@ -4,6 +4,7 @@
 // read (a power cut on a disk that lied about flushing) falls back to the .bak instead of
 // resetting everything, and is kept aside rather than overwritten.
 import { closeSync, copyFileSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import * as fsp from "node:fs/promises";
 import { join } from "node:path";
 import { app } from "electron";
 import { DEFAULT_DATA, DEFAULT_SETTINGS, type Data, type Settings } from "@shared/types";
@@ -77,16 +78,66 @@ class JsonFile<T extends object> {
   private save(delay = 300): void {
     this.dirty = true;
     if (this.timer) clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.flush(), delay);
+    this.timer = setTimeout(() => void this.write(), delay);
   }
 
-  /** writes now if anything changed; on quit `final` falls back to an in-place write */
+  // a save while VyseBar runs goes to disk in the background: main's thread carries the
+  // dock's pointer, and flushing a file to a disk that is busy (Windows paging on a PC short of
+  // memory, a virus scan) could hold it up for a moment
+  private writing = false;
+  // goes up with every write begun; a background write that a newer one overtook (a save on
+  // quit) leaves the file to it
+  private seq = 0;
+
+  private async write(): Promise<void> {
+    this.timer = null;
+    if (!this.dirty) return;
+    // one at a time; a change made during a write is saved right after it
+    if (this.writing) return this.save(50);
+    this.writing = true;
+    this.dirty = false;
+    const mine = ++this.seq;
+    const text = JSON.stringify(this.value, null, 1);
+    const tmp = this.file + ".tmp";
+    try {
+      const fh = await fsp.open(tmp, "w");
+      try {
+        await fh.writeFile(text);
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
+      await fsp.copyFile(this.file, this.file + ".bak").catch((e: NodeJS.ErrnoException) => {
+        if (e.code !== "ENOENT") throw e;
+      });
+      // a save on quit overtook this one: the file has the newer text. Otherwise the rename
+      // goes straight after that check, with nothing in between
+      if (mine !== this.seq) return void (await fsp.rm(tmp, { force: true }).catch(() => undefined));
+      renameSync(tmp, this.file);
+      this.retries = 0;
+    } catch (err) {
+      await fsp.rm(tmp, { force: true }).catch(() => undefined);
+      if (mine !== this.seq) return;
+      this.dirty = true;
+      // usually a virus scanner or backup tool holding the file for a moment
+      if (this.retries++ < 40) this.save(Math.min(250 * this.retries, 3000));
+      else console.error(`VyseBar: couldn't save ${this.file}`, err);
+    } finally {
+      this.writing = false;
+    }
+  }
+
+  /** writes now, on this thread, if anything changed: for quitting and Windows shutting down,
+   * when there is no later. `final` falls back to an in-place write */
   flush(final = false): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    // a background write still on its way holds older text, or the same
+    if (this.writing) this.dirty = true;
     if (!this.dirty) return;
+    this.seq++;
     const text = JSON.stringify(this.value, null, 1);
-    const tmp = this.file + ".tmp";
+    const tmp = this.file + (this.writing ? ".tmp2" : ".tmp");
     try {
       const fd = openSync(tmp, "w");
       try {
